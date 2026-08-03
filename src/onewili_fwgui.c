@@ -15,6 +15,7 @@
 #define OWFW_CMD_SYNC0     0xBE    /* main->display command frames */
 #define OWFW_CMD_SYNC1     0xBA
 #define OWFW_EVT_TERM      0x18    /* FWGUI_EVENT_M_TERM_INPUT (24) */
+#define OWFW_EVT_POWER_ZONES 0x30  /* FWGUI_EVENT_POWER_ZONES (48)  */
 #define OWFW_MARKER        0x01    /* OneWili chunk marker          */
 #define OWFW_CHUNK_MAX     56      /* text bytes per event frame    */
 #define OWFW_CMD_RESPONSE  0x5D    /* FWGUI_API_ONEWILL_RESPONSE    */
@@ -126,6 +127,23 @@ static void owfw_send_chunk(const uint8_t* text, uint8_t n) {
     uart_write_blocking(uart0, f, k);
 }
 
+/* Generic B0 1D event frame: sync | len u16le (excludes event code) |
+ * event code | payload | cksum u16le (additive sum over every preceding
+ * byte). Fire-and-forget, like owfw_send_chunk — no response is read. */
+static void owfw_send_event(uint8_t event_code, const uint8_t* payload, uint8_t n) {
+    uint8_t f[2 + 2 + 1 + 32 + 2];
+    uint16_t len = (uint16_t)n;
+    uint32_t k = 0;
+    f[k++] = OWFW_EVT_SYNC0; f[k++] = OWFW_EVT_SYNC1;
+    f[k++] = (uint8_t)(len & 0xFF); f[k++] = (uint8_t)(len >> 8);
+    f[k++] = event_code;
+    memcpy(&f[k], payload, n); k += n;
+    uint16_t sum = 0;
+    for (uint32_t i = 0; i < k; i++) sum = (uint16_t)(sum + f[i]);
+    f[k++] = (uint8_t)(sum & 0xFF); f[k++] = (uint8_t)(sum >> 8);
+    uart_write_blocking(uart0, f, k);
+}
+
 static int owfw_write(void* ctx, const uint8_t* data, size_t len) {
     (void)ctx;
     size_t off = 0;
@@ -182,3 +200,12 @@ ow_transport ow_fwgui_binary_transport(void) {
 }
 
 uint32_t ow_fwgui_dropped_frames(void) { return g_dropped; }
+
+void ow_fwgui_send_power_zones(uint32_t zone_mask) {
+    uint8_t payload[3] = {
+        (uint8_t)(zone_mask & 0xFF),
+        (uint8_t)((zone_mask >> 8) & 0xFF),
+        (uint8_t)((zone_mask >> 16) & 0xFF),
+    };
+    owfw_send_event(OWFW_EVT_POWER_ZONES, payload, 3);
+}

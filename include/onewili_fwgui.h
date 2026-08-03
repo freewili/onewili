@@ -17,4 +17,10 @@ ow_transport ow_fwgui_binary_transport(void);
 /* Frames dropped because a stream buffer was full (poll more often). */
 uint32_t ow_fwgui_dropped_frames(void);
 
+/* Sends FWGUI_EVENT_POWER_ZONES (event 48) with the live rail mask so MAIN
+ * can (re)init anything gated on a zone, e.g. its CAN controller. Idempotent
+ * fire-and-forget (no response is read) — call after open, on mask change,
+ * and periodically, since MAIN can reboot independently of DISPLAY. */
+void ow_fwgui_send_power_zones(uint32_t zone_mask);
+
 #endif /* ONEWILI_FWGUI_H */
