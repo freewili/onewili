@@ -14,10 +14,24 @@ ow_status ow_open_fwgui(ow_device* dev);
  * for ow_binary_open/ow_binary_poll. Valid after ow_open_fwgui. */
 ow_transport ow_fwgui_binary_transport(void);
 
-/* Frames dropped because a stream buffer was full (poll more often). */
+/* Whole frames discarded on receive, from all three sources combined:
+ *   - a text (0x5D) or binary (0x5E) stream buffer was full -- the app is not
+ *     draining ow_poll_* / ow_binary_poll often enough;
+ *   - the SDFS (0x5F) response ring was full -- the server sent more frames
+ *     than an in-flight SD call consumed, so polling more often does NOT help
+ *     (the app was already blocked inside that call);
+ *   - an SDFS frame was longer than SDFS_MAX_FRAME.
+ * Free-running counter; never reset except by ow_open_fwgui. */
 uint32_t ow_fwgui_dropped_frames(void);
 
-/* Sends FWGUI_EVENT_POWER_ZONES (event 48) with the live rail mask so MAIN
+/* The SDFS request/response stream as an sdfslib transport. ow_open_fwgui
+ * already binds this to the ow_sd_* API (onewili_sd.h); use it directly only
+ * to drive sdfslib yourself. Valid after ow_open_fwgui. */
+#include "sdfs_transport.h"
+sdfs_transport_t ow_fwgui_sdfs_transport(void);
+
+/* LOCAL ADDITION — not in the generated package; re-apply after every re-copy.
+ * Sends FWGUI_EVENT_POWER_ZONES (event 48) with the live rail mask so MAIN
  * can (re)init anything gated on a zone, e.g. its CAN controller. Idempotent
  * fire-and-forget (no response is read) — call after open, on mask change,
  * and periodically, since MAIN can reboot independently of DISPLAY. */

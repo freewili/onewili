@@ -44,6 +44,24 @@ static int ow__is_frame(const char* s) {
     return s[1] == '?' || (s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z');
 }
 
+/* Opens either kind of frame, response or event. Length-checked: the caller
+ * asks about bytes that may still be mid-arrival. */
+static int ow__opens_frame(const char* s, size_t len) {
+    if (len < 2 || s[0] != '[') return 0;
+    return s[1] == '*' || s[1] == '?' ||
+           (s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z');
+}
+
+/* Does s[0..len) end with the closing " <ok>]" token? Judged on the whole
+ * token and never on a bare ']', because a payload can end a line with a ']'
+ * of its own. */
+static int ow__frame_closed(const char* s, size_t len) {
+    if (len && s[len - 1] == '\r') --len;
+    return len >= 3 && s[len - 1] == ']' &&
+           (s[len - 2] == '0' || s[len - 2] == '1') &&
+           (s[len - 3] == ' ' || s[len - 3] == '\t' || s[len - 3] == '\n');
+}
+
 static ow_status ow__parse_frame(const char* line, char* resp, size_t cap, int* ok) {
     size_t len = strlen(line);
     if (len < 5 || line[0] != '[' || line[len - 1] != ']') return OW_ERR_PROTOCOL;
@@ -59,6 +77,9 @@ static ow_status ow__parse_frame(const char* line, char* resp, size_t cap, int* 
     if (last <= body) return OW_ERR_PROTOCOL;
     *ok = (last[0] == '1');
     size_t rlen = (size_t)((last - 1) - body);
+    /* A payload newline abutting the closing token is the line terminator the
+     * firmware printed, not payload; newlines inside the payload stay. */
+    while (rlen && (body[rlen - 1] == '\n' || body[rlen - 1] == '\r')) --rlen;
     if (rlen >= cap) return OW_ERR_BUFFER;
     memcpy(resp, body, rlen); resp[rlen] = 0;
     return OW_OK;
@@ -85,14 +106,38 @@ static void ow__evq_push(ow_device* dev, const char* line) {
 
 /* Accumulate transport reads into dev->line until one '\n'-terminated line is
  * complete; the line (without EOL) is left at dev->line[0..] and the remainder
- * shifted down for the next call. */
+ * shifted down for the next call.
+ *
+ * A handler that prints a newline into its response splits the frame across
+ * physical lines, so a newline inside an unclosed frame is not a line ending:
+ * the scan keeps going until the line carrying the " <ok>]" token. dev->line
+ * doubles as the reassembly buffer, so OW_RESP_MAX caps how much an unclosed
+ * '[' can absorb (OW_ERR_BUFFER below), and the transport's own timeout_ms
+ * bounds how long it can wait; ow__call clears line_len per command so a
+ * half-frame never leaks into the next one. */
 static ow_status ow__read_line(ow_device* dev, char* out, size_t outcap,
                                uint32_t timeout_ms) {
     for (;;) {
         int routed = 0;
         for (size_t i = 0; i < dev->line_len; ++i) {
             if (dev->line[i] == '\n') {
-                size_t linelen = i;
+                size_t linelen;
+                if (ow__opens_frame(dev->line, dev->line_len)
+                    && !ow__frame_closed(dev->line, i)) {
+                    if (!ow__opens_frame(dev->line + i + 1,
+                                         dev->line_len - i - 1))
+                        continue;   /* payload newline: wait for the token */
+                    /* The next line opens a frame of its own, so the held one
+                     * can never close. Drop it and rescan; guessing which of
+                     * two open frames a later line belongs to is not
+                     * decidable from the wire. */
+                    memmove(dev->line, dev->line + i + 1,
+                            dev->line_len - i - 1);
+                    dev->line_len -= i + 1;
+                    routed = 1;
+                    break;
+                }
+                linelen = i;
                 if (linelen && dev->line[linelen - 1] == '\r') --linelen;
                 if (linelen >= outcap) return OW_ERR_BUFFER;
                 memcpy(out, dev->line, linelen); out[linelen] = 0;
@@ -341,12 +386,134 @@ ow_status ow_io_gpio_toggle_hsbdio(ow_device* dev, int32_t pin)
     return OW_OK;
 }
 
-ow_status ow_io_gpio_show_io_direction_settings(ow_device* dev)
+ow_status ow_io_gpio_set_io_voltage_source(ow_device* dev, int32_t source)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\v")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)source)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_s_pi1_rx12(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_g_pio2626(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\b")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_s_pi1cs13(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\c")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_g_pio27(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\l")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_u_art1_rx9(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\e")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_u_art1cts10(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\f")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_u_art1_tx8(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\g")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_u_art1rts11(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\m")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_s_pi1_tx15(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_s_pi1sclk14(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\j")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_gpio_io_direction_settings_g_pio2525(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\g\\a\\k")) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -387,12 +554,83 @@ ow_status ow_io_uart_uart_enable_api_mode(ow_device* dev)
     return OW_OK;
 }
 
-ow_status ow_io_uart_show_uart_settings(ow_device* dev)
+ow_status ow_io_uart_settings_baud_rate(ow_device* dev, int32_t value)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_uart_settings_r_ts_hand_shaking(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_uart_settings_c_ts_hand_shaking(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s\\c")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_uart_settings_data_bits(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_uart_settings_parity(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s\\p")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_uart_settings_stop_bits(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s\\s")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_uart_settings_module(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\u\\s\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -602,13 +840,60 @@ ow_status ow_io_mdio_mdiormw_emu(ow_device* dev, uint8_t phy_address, uint8_t mm
     return OW_OK;
 }
 
-ow_status ow_io_sensors_enable_accel_stream(ow_device* dev, int32_t stream_rate_ms)
+ow_status ow_io_sensors_enable_motion_stream(ow_device* dev, int32_t stream_rate_ms)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\s\\o")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\s\\m")) != OW_OK) return r;
     if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)stream_rate_ms)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_sensors_enable_field_stream(ow_device* dev, int32_t stream_rate_ms)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\s\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)stream_rate_ms)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_sensors_enable_env_stream(ow_device* dev, int32_t stream_rate_ms)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\s\\e")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)stream_rate_ms)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_sensors_enable_orientation_stream(ow_device* dev, int32_t stream_rate_ms)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\s\\r")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)stream_rate_ms)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_sensors_get_sensors(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\s\\g")) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -651,12 +936,25 @@ ow_status ow_io_i2c_i2c_poll(ow_device* dev)
     return OW_OK;
 }
 
-ow_status ow_io_i2c_show_i2c_settings(ow_device* dev)
+ow_status ow_io_i2c_settings_frequency(ow_device* dev, int32_t value)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\i\\s")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\i\\s\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_i2c_settings_pull_ups(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\i\\s\\p")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -675,12 +973,59 @@ ow_status ow_io_spi_s_pi_write(ow_device* dev, const uint8_t* data_bytes, size_t
     return OW_OK;
 }
 
-ow_status ow_io_spi_show_spi_settings(ow_device* dev)
+ow_status ow_io_spi_settings_frequency(ow_device* dev, int32_t value)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\e\\s")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\e\\s\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_spi_settings_chip_select_pin(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\e\\s\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_spi_settings_data_bits(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\e\\s\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_spi_settings_c_pol(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\e\\s\\p")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_spi_settings_c_pha(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\e\\s\\a")) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -797,6 +1142,63 @@ ow_status ow_io_analog_in_enable_analog_in_stream(ow_device* dev, int32_t stream
     return OW_OK;
 }
 
+ow_status ow_io_analog_in_read_analog_in2024(ow_device* dev, double* v0, double* v1, double* v2, double* v3)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\j\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { double v; if ((r = ow__tok_double(&cur, &v)) != OW_OK) return r;
+      if (v0) *v0 = v; }
+    { double v; if ((r = ow__tok_double(&cur, &v)) != OW_OK) return r;
+      if (v1) *v1 = v; }
+    { double v; if ((r = ow__tok_double(&cur, &v)) != OW_OK) return r;
+      if (v2) *v2 = v; }
+    { double v; if ((r = ow__tok_double(&cur, &v)) != OW_OK) return r;
+      if (v3) *v3 = v; }
+    return OW_OK;
+}
+
+ow_status ow_io_analog_in_config_analog_in2024(ow_device* dev, int32_t channel, int32_t mux, int32_t range)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\j\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)channel)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)mux)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)range)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_analog_in_set_data_rate2024(ow_device* dev, int32_t rate)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\j\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)rate)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_analog_in_enable_analog_in2024_stream(ow_device* dev, int32_t stream_rate_ms)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\j\\t")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)stream_rate_ms)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
 ow_status ow_io_analog_out_set_analog_output(ow_device* dev, int32_t channel, double value)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
@@ -854,6 +1256,35 @@ ow_status ow_io_analog_out_set_glitch(ow_device* dev, int32_t nano_seconds)
     ow_status r;
     if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\a\\g")) != OW_OK) return r;
     if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)nano_seconds)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_analog_out_set_waveform(ow_device* dev, int32_t channel, ow_dac_wave_shape_menu waveform, double frequency_hz, double low_voltage, double high_voltage, ow_dac_wave_phase phase)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\a\\w")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)channel)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)waveform)) != OW_OK) return r;
+    if ((r = ow__cat_float(cmd, sizeof cmd, &pos, frequency_hz)) != OW_OK) return r;
+    if ((r = ow__cat_float(cmd, sizeof cmd, &pos, low_voltage)) != OW_OK) return r;
+    if ((r = ow__cat_float(cmd, sizeof cmd, &pos, high_voltage)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)phase)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_analog_out_set_waveform_run(ow_device* dev, int32_t mask)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\a\\x")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)mask)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -1209,6 +1640,87 @@ ow_status ow_io_audio_speak(ow_device* dev, const char* text)
     return OW_OK;
 }
 
+ow_status ow_io_serial_leds_configure_strip(ow_device* dev, int32_t strip, int32_t gpio, int32_t length, ow_ow_serial_led_type led_type, bool inverted)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\l\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)strip)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)gpio)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)length)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)led_type)) != OW_OK) return r;
+    if ((r = ow__cat_bool(cmd, sizeof cmd, &pos, inverted)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_serial_leds_show_config(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\l\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_serial_leds_set_leds(ow_device* dev, int32_t strip, int32_t start, int32_t count, int32_t red, int32_t green, int32_t blue, int32_t white)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\l\\v")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)strip)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)start)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)count)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)red)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)green)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)blue)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)white)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_serial_leds_set_show(ow_device* dev, int32_t strip, ow_ow_led_light_show show)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\l\\w")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)strip)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)show)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_serial_leds_enable_jambu_orca(ow_device* dev, int32_t num_strips)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\l\\j")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)num_strips)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_io_serial_leds_auto_show(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "i\\l\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
 ow_status ow_gui_set_led_color(ow_device* dev, int32_t ledindex, int32_t red, int32_t green, int32_t blue, int32_t duration, ow_ow_led_manager_led_mode mode)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
@@ -1291,6 +1803,34 @@ ow_status ow_gui_show_image_asset_by_id(ow_device* dev, int32_t image_id)
     ow_status r;
     if ((r = ow__cat(cmd, sizeof cmd, &pos, "g\\a")) != OW_OK) return r;
     if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)image_id)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_gui_screenshot(ow_device* dev, const char* filename, ow_ow_screenshot_file_type filetype, bool counter, bool timestamp)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "g\\i")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, filename)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)filetype)) != OW_OK) return r;
+    if ((r = ow__cat_bool(cmd, sizeof cmd, &pos, counter)) != OW_OK) return r;
+    if ((r = ow__cat_bool(cmd, sizeof cmd, &pos, timestamp)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_gui_simulate_keypress(ow_device* dev, ow_ow_gui_button button, ow_ow_button_press_type presstype)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "g\\k")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)button)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)presstype)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -1524,6 +2064,65 @@ ow_status ow_gui_controls_add_picture_from_file(ow_device* dev, int32_t index, i
     if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)x)) != OW_OK) return r;
     if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)y)) != OW_OK) return r;
     if ((r = ow__cat_str(cmd, sizeof cmd, &pos, picture_path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_gui_controls_add_waterfall(ow_device* dev, int32_t index, int32_t plot_data_index, int32_t bin_count, int32_t x, int32_t y, int32_t width, int32_t height, const char* back_color)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "g\\b\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)index)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)plot_data_index)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)bin_count)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)x)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)y)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)width)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)height)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, back_color)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_gui_controls_add_wili8(ow_device* dev, int32_t index, int32_t x, int32_t y, int32_t width, int32_t height, int32_t scale, const char* back_color, int32_t animation, const char* script_path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "g\\b\\n")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)index)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)x)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)y)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)width)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)height)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)scale)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, back_color)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)animation)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, script_path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_gui_controls_add_file_list(ow_device* dev, int32_t index, int32_t x, int32_t y, int32_t width, int32_t height, int32_t mode, const char* back_color, const char* start_path, const char* filter)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "g\\b\\o")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)index)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)x)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)y)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)width)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)height)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)mode)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, back_color)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, start_path)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, filter)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -1801,12 +2400,1733 @@ ow_status ow_gui_dialogs_set_progess_dialog_value(ow_device* dev, int32_t value0
     return OW_OK;
 }
 
-ow_status ow_hardware_do_something(ow_device* dev)
+ow_status ow_gui_dialogs_file_picker(ow_device* dev, int32_t mode, const char* start_path, const char* filter)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "g\\f\\l")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)mode)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, start_path)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, filter)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_software_reset(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\1")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_software_reset_to_bootloader(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\2")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_all_settings_to_defaults(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\3")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_uart_settings_baud_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\u\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_uart_settings_r_ts_hand_shaking(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\u\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_uart_settings_c_ts_hand_shaking(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\u\\c")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_uart_settings_data_bits(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\u\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_uart_settings_parity(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\u\\p")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_uart_settings_stop_bits(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\u\\s")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_uart_settings_module(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\u\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_i2c_settings_frequency(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\i\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_i2c_settings_pull_ups(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\i\\p")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_sensor_settings_accel_range(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\v\\a")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_sensor_settings_gyro_range(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\v\\g")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_sensor_settings_move_threshold(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\v\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_sensor_settings_t_cal_scale(ow_device* dev, double value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\v\\s")) != OW_OK) return r;
+    if ((r = ow__cat_float(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_sensor_settings_t_cal_offset(ow_device* dev, double value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\v\\o")) != OW_OK) return r;
+    if ((r = ow__cat_float(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_sensor_settings_stream_defaults(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\v\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_spi_settings_frequency(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\s\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_spi_settings_chip_select_pin(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\s\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_spi_settings_data_bits(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\s\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_spi_settings_c_pol(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\s\\p")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_spi_settings_c_pha(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\s\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_s_pi1_rx12(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_g_pio2626(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\b")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_s_pi1cs13(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\c")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_g_pio27(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\l")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_u_art1_rx9(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\e")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_u_art1cts10(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\f")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_u_art1_tx8(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\g")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_u_art1rts11(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\m")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_s_pi1_tx15(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_s_pi1sclk14(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\j")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_io_direction_settings_g_pio2525(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\o\\k")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_fpga_clock_settings_clk_source(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\f\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_fpga_clock_settings_clk_divider_int(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\f\\i")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_fpga_clock_settings_clk_divider_frac(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\f\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_fpga_clock_settings_comms_mode(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\f\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_frequency_mhz(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_modulation(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_devation(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\a")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_channel(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_channel_spacing(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_rx_bandwidth(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\y")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_data_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\e")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_power_amp(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\g")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_sync_mode(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\1")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_sync_word(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\i")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_addr_check(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\j")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_address(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\k")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_white_data(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\l")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_packet_format(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\n")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_length_config(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\o")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_packet_length(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\p")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_c_rc_enabled(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\x")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_c_rc_auto_flush(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\0")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_d_c_blocking_filter(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_manchester(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_forword_error_correction(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_preamble_bytes(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\u")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_p_qt(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\v")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_append_status(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\r\\w")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_frequency_mhz(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_modulation(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_devation(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\a")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_channel(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_channel_spacing(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_rx_bandwidth(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\y")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_data_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\e")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_power_amp(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\g")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_sync_mode(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\1")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_sync_word(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\i")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_addr_check(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\j")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_address(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\k")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_white_data(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\l")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_packet_format(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\n")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_length_config(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\o")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_packet_length(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\p")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_c_rc_enabled(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\x")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_c_rc_auto_flush(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\0")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_d_c_blocking_filter(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_manchester(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_forword_error_correction(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_preamble_bytes(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\u")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_p_qt(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\v")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_settings_2_append_status(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\t\\w")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_radio_fa_settings_default_view(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\a\\a")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_year(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\y")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_month(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\n")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_day(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\e")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_day_of_week(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\w")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_hours(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\o")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_minutes(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_seconds(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\s")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_rtc_settings_trim(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\c\\t")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_enable_station_mode(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_s_sid_for_station_mode(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\e")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_password_for_station_mode(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\p")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_enable_ap_mode(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_a_p_auth(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\u")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_a_p_hide_ssid(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_s_sid_for_ap(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\g")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_wifi_settings_password_for_ap(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\w\\x")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_ble_settings_enable_bt(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\b\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_ble_settings_b_t_terminal(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\b\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_ble_settings_b_t_advert_name(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\b\\a")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_orca_settings_orca_com_over_uart(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\g\\u")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_websocket_settings_start_ws_server(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\k\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_websocket_settings_w_s_server_port(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\k\\p")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_websocket_settings_auth_mode(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\k\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_websocket_settings_auth_username(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\k\\u")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_websocket_settings_auth_password(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\k\\e")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1_mode(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\a")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1fdd_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1_listen_only(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\y")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1_tx_retry(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\e")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1_cust_baud(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\f")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1_cust_data_baud(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\g")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1_termination(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\1")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an1api_enabled(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_anapiid(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\j")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2_mode(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\k")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\l")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2fdd_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2_listen_only(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\n")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2_tx_retry(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\o")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2_cust_baud(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\p")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2_cust_data_baud(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\r")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2_termination(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_c_an2api_enabled(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_l_in_master_en(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\u")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_l_in_baud_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\v")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_neptune_settings_analog_in_en(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\p\\x")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_general_settings_startup_wasm_script(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\e\\a")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_general_settings_startup_zoom_script(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\e\\b")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_general_settings_default_fpga_script(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\e\\c")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_general_settings_wasm_debug_level(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\e\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch0_input(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\0")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch1_input(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\1")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch2_input(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\2")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch3_input(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\3")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch0_range(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\4")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch1_range(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\5")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch2_range(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\6")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_ch3_range(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\7")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_analog_in_settings_data_rate(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\s\\j\\8")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -1824,6 +4144,330 @@ ow_status ow_hardware_system_enable_battery_stream(ow_device* dev, int32_t enabl
     return OW_OK;
 }
 
+ow_status ow_hardware_system_read_otp_info(ow_device* dev, int32_t offset, int32_t length, uint8_t* otp_blob, size_t otp_blob_cap, size_t* otp_blob_len)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\a\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)offset)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)length)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    if ((r = ow__rest_bytes(&cur, otp_blob, otp_blob_cap, otp_blob_len)) != OW_OK) return r;
+    return OW_OK;
+}
+
+ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\a\\g")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    if ((r = ow__rest_str(&cur, sd, sd_cap)) != OW_OK) return r;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (hoststream) *hoststream = (v != 0); }
+    if ((r = ow__rest_str(&cur, activemask, activemask_cap)) != OW_OK) return r;
+    return OW_OK;
+}
+
+ow_status ow_hardware_system_event_host_streaming(ow_device* dev, int32_t enable, bool* enabled)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\a\\e")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)enable)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (enabled) *enabled = (v != 0); }
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_change_directory(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\a")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_create_directory(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\c")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_remove_file_or_directory(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\r")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_get_file_from_pc(ow_device* dev, const char* path, int32_t size, int32_t crc32)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\f")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)size)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)crc32)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_send_file_to_pc(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\u")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_print_file(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\p")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_create_blank_file(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\b")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_edit_file(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\e")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_rename_or_move_file_directory(ow_device* dev, const char* path, const char* new_path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\n")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, new_path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_list_directory(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\l")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_format_file_system(ow_device* dev, const char* confirm)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\t")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, confirm)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_toggle_sd_card_host_select(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_load_wili_project(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\w")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_set_sd_card_host(ow_device* dev, int32_t host)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\x\\k")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)host)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_list_zones(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\l")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_get_zones(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\g")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_set_zone(ow_device* dev, int32_t zone, int32_t on)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\s")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)zone)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_set_zone_mask(ow_device* dev, int32_t mask)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\m")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)mask)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_get_power_state(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_enable_power_stream(ow_device* dev, int32_t stream_rate_ms)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\o")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)stream_rate_ms)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_set_wio_reset_line(ow_device* dev, ow_reset_line_state state)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\w")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)state)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_set_cm0_run_line(ow_device* dev, ow_reset_line_state state)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)state)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_hardware_power_management_get_control_lines(ow_device* dev, bool* wio_released, bool* cm0_released, bool* main_rst_high)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "h\\p\\n")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (wio_released) *wio_released = (v != 0); }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (cm0_released) *cm0_released = (v != 0); }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (main_rst_high) *main_rst_high = (v != 0); }
+    return OW_OK;
+}
+
 ow_status ow_wireless_nfc_enable_reader(ow_device* dev, int32_t enable)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
@@ -1831,6 +4475,198 @@ ow_status ow_wireless_nfc_enable_reader(ow_device* dev, int32_t enable)
     ow_status r;
     if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\r")) != OW_OK) return r;
     if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)enable)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_print_card_info(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\c")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_get_status(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\g")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_saved_cards_list_saved_cards(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\s\\l")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_saved_cards_load_card(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\s\\o")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_saved_cards_save_current_card(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\s\\s")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_mifare_classic_read_with_keys(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\m\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_mifare_classic_dictionary_attack(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\m\\a")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_mifare_classic_dump_card(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\m\\u")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_raw_begin(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\k\\b")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_raw_end(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\k\\e")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_raw_field(ow_device* dev, int32_t on)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\k\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_raw_reg_write(ow_device* dev, uint32_t addr, uint32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\k\\w")) != OW_OK) return r;
+    if ((r = ow__cat_hex(cmd, sizeof cmd, &pos, (unsigned long)addr, 1)) != OW_OK) return r;
+    if ((r = ow__cat_hex(cmd, sizeof cmd, &pos, (unsigned long)value, 1)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_raw_reg_read(ow_device* dev, uint32_t addr, uint32_t* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\k\\r")) != OW_OK) return r;
+    if ((r = ow__cat_hex(cmd, sizeof cmd, &pos, (unsigned long)addr, 1)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { unsigned long v; if ((r = ow__tok_ulong(&cur, &v, 16)) != OW_OK) return r;
+      if (value) *value = (uint32_t)v; }
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_raw_cmd(ow_device* dev, uint32_t command)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\k\\c")) != OW_OK) return r;
+    if ((r = ow__cat_hex(cmd, sizeof cmd, &pos, (unsigned long)command, 1)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_raw_transceive(ow_device* dev, uint32_t flags, int32_t timeout_ms, const uint8_t* tx, size_t tx_len, uint32_t* status, uint8_t* rx, size_t rx_cap, size_t* rx_len)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\k\\t")) != OW_OK) return r;
+    if ((r = ow__cat_hex(cmd, sizeof cmd, &pos, (unsigned long)flags, 1)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)timeout_ms)) != OW_OK) return r;
+    if ((r = ow__cat_bytes(cmd, sizeof cmd, &pos, tx, tx_len)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { unsigned long v; if ((r = ow__tok_ulong(&cur, &v, 16)) != OW_OK) return r;
+      if (status) *status = (uint32_t)v; }
+    if ((r = ow__rest_bytes(&cur, rx, rx_cap, rx_len)) != OW_OK) return r;
+    return OW_OK;
+}
+
+ow_status ow_wireless_nfc_extra_halt_card(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\n\\x\\a")) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -2155,12 +4991,94 @@ ow_status ow_wireless_wifi_on_get_wif_info(ow_device* dev)
     return OW_OK;
 }
 
-ow_status ow_wireless_wifi_wifi_open_settings(ow_device* dev)
+ow_status ow_wireless_wifi_settings_enable_station_mode(ow_device* dev)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_wifi_settings_s_sid_for_station_mode(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\e")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_wifi_settings_password_for_station_mode(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\p")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_wifi_settings_enable_ap_mode(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_wifi_settings_a_p_auth(ow_device* dev, int32_t value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\u")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_wifi_settings_a_p_hide_ssid(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_wifi_settings_s_sid_for_ap(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\g")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_wifi_settings_password_for_ap(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\w\\e\\x")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -2212,12 +5130,35 @@ ow_status ow_wireless_bluetooth_le_on_enable_terminal(ow_device* dev)
     return OW_OK;
 }
 
-ow_status ow_wireless_bluetooth_le_ble_open_settings(ow_device* dev)
+ow_status ow_wireless_bluetooth_le_ble_settings_enable_bt(ow_device* dev)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
-    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\b\\b")) != OW_OK) return r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\b\\b\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_bluetooth_le_ble_settings_b_t_terminal(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\b\\b\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_bluetooth_le_ble_settings_b_t_advert_name(ow_device* dev, const char* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\b\\b\\a")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -2247,12 +5188,527 @@ ow_status ow_wireless_ir_send_ir_data(ow_device* dev, int32_t ir_code)
     return OW_OK;
 }
 
+ow_status ow_wireless_lo_ra_configure(ow_device* dev, int32_t freq_hz, int32_t sf, int32_t bw_enc, int32_t cr, int32_t power, int32_t preamble, uint8_t sync)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\l\\c")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)freq_hz)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)sf)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)bw_enc)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)cr)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)power)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)preamble)) != OW_OK) return r;
+    if ((r = ow__cat_hex(cmd, sizeof cmd, &pos, (unsigned long)sync, 2)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_lo_ra_send_payload(ow_device* dev, const uint8_t* data, size_t data_len)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\l\\s")) != OW_OK) return r;
+    if ((r = ow__cat_bytes(cmd, sizeof cmd, &pos, data, data_len)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_lo_ra_rx_enable(ow_device* dev, int32_t mode)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\l\\r")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)mode)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_lo_ra_status(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\l\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_lo_ra_raw_frame(ow_device* dev, uint8_t cmd_, const uint8_t* payload, size_t payload_len)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\l\\f")) != OW_OK) return r;
+    if ((r = ow__cat_hex(cmd, sizeof cmd, &pos, (unsigned long)cmd_, 2)) != OW_OK) return r;
+    if ((r = ow__cat_bytes(cmd, sizeof cmd, &pos, payload, payload_len)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_select_circuit(ow_device* dev, int32_t band)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\s")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)band)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_release_circuit(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\e")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_read_state(ow_device* dev, int32_t* owner, int32_t* holder, int32_t* band, int32_t* want_v1, int32_t* want_v2, int32_t* have_valid, int32_t* have_v1, int32_t* have_v2, int32_t* lora_paused, int32_t* freq_hz, int32_t* active, int32_t* status, uint8_t* version)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (owner) *owner = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (holder) *holder = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (band) *band = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (want_v1) *want_v1 = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (want_v2) *want_v2 = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (have_valid) *have_valid = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (have_v1) *have_v1 = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (have_v2) *have_v2 = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (lora_paused) *lora_paused = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (freq_hz) *freq_hz = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (active) *active = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (status) *status = (int32_t)v; }
+    { unsigned long v; if ((r = ow__tok_ulong(&cur, &v, 16)) != OW_OK) return r;
+      if (version) *version = (uint8_t)v; }
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_select_band(ow_device* dev, int32_t band)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\b")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)band)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_comm_check(ow_device* dev, uint8_t* version)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\c")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { unsigned long v; if ((r = ow__tok_ulong(&cur, &v, 16)) != OW_OK) return r;
+      if (version) *version = (uint8_t)v; }
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_set_frequency(ow_device* dev, int32_t freq_hz, int32_t* band)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\f")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)freq_hz)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (band) *band = (int32_t)v; }
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_read_rssi(ow_device* dev, int32_t* rssi)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (rssi) *rssi = (int32_t)v; }
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_carrier(ow_device* dev, int32_t on)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\o")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_rx_enable(ow_device* dev, int32_t on)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\r")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_idle(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\w")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_packet_send(ow_device* dev, int32_t freq_hz, const uint8_t* data, size_t data_len)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\x")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)freq_hz)) != OW_OK) return r;
+    if ((r = ow__cat_bytes(cmd, sizeof cmd, &pos, data, data_len)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_packet_rx(ow_device* dev, int32_t on, int32_t freq_hz)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\y")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)freq_hz)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_packet_read(ow_device* dev, int32_t* rssi, int32_t* seq, uint8_t* data, size_t data_cap, size_t* data_len)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\k")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (rssi) *rssi = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (seq) *seq = (int32_t)v; }
+    if ((r = ow__rest_bytes(&cur, data, data_cap, data_len)) != OW_OK) return r;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_capture_start(ow_device* dev, int32_t freq_hz, int32_t preset)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\g")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)freq_hz)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)preset)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_capture_stop(ow_device* dev, int32_t* durations)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\j")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (durations) *durations = (int32_t)v; }
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_replay(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\p")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_analyzer(ow_device* dev, int32_t on)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\a")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_spectrum(ow_device* dev, int32_t* peak_freq_hz, int32_t* peak_rssi, uint8_t* bins, size_t bins_cap, size_t* bins_len)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\n")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (peak_freq_hz) *peak_freq_hz = (int32_t)v; }
+    { long v; if ((r = ow__tok_long(&cur, &v, 10)) != OW_OK) return r;
+      if (peak_rssi) *peak_rssi = (int32_t)v; }
+    if ((r = ow__rest_bytes(&cur, bins, bins_cap, bins_len)) != OW_OK) return r;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_squelch(ow_device* dev, int32_t dbm)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\u")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)dbm)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_replay_invert(ow_device* dev, int32_t on)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\v")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_transmit_sub_file(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\m")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_wireless_radio_monitor(ow_device* dev, int32_t on)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "w\\r\\l")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)on)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
 ow_status ow_scripting_launch_script(ow_device* dev)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
     if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_app_signals_app_signal_add(ow_device* dev, const char* name)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\i\\a")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, name)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_app_signals_app_signal_remove(ow_device* dev, const char* name)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\i\\x")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, name)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_app_signals_app_signal_rename(ow_device* dev, const char* name, const char* new_name)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\i\\r")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, name)) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, new_name)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_app_signals_app_signal_set(ow_device* dev, const char* name, double value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\i\\s")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, name)) != OW_OK) return r;
+    if ((r = ow__cat_float(cmd, sizeof cmd, &pos, value)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_app_signals_app_signal_get(ow_device* dev, const char* name, char* name_out, size_t name_out_cap, double* value)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\i\\g")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, name)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    char* cur = resp;
+    if ((r = ow__rest_str(&cur, name_out, name_out_cap)) != OW_OK) return r;
+    { double v; if ((r = ow__tok_double(&cur, &v)) != OW_OK) return r;
+      if (value) *value = v; }
+    return OW_OK;
+}
+
+ow_status ow_scripting_app_signals_app_signal_wave(ow_device* dev, const char* name, int32_t wave)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\i\\w")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, name)) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)wave)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_app_signals_app_signal_stream(ow_device* dev, int32_t stream_rate_ms)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\i\\t")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)stream_rate_ms)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wili_files_wili_load(ow_device* dev, const char* filepath)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\f\\l")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, filepath)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wili_files_wili_save(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\f\\s")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wili_files_wili_reset(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\f\\r")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wili_files_wili_default(ow_device* dev, const char* filepath)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\f\\m")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, filepath)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wili_files_wili_remove_default(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\f\\x")) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -2343,12 +5799,184 @@ ow_status ow_scripting_zoom_io_stop_zio(ow_device* dev)
     return OW_OK;
 }
 
-ow_status ow_apps_launch_app(ow_device* dev)
+ow_status ow_scripting_wasm_debug_debug_start(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\c")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wasm_debug_debug_breakpoints(ow_device* dev, const char* pcs)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\j")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, pcs)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wasm_debug_debug_step(ow_device* dev, const char* range)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\e")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, range)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wasm_debug_debug_continue(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\f")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wasm_debug_debug_pause(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\g")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wasm_debug_debug_stop(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wasm_debug_debug_locals(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_wasm_debug_debug_mem_read(ow_device* dev, const char* addr)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\w\\r")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, addr)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_rthon_debug_debug_start(ow_device* dev, const char* path)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\r\\c")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, path)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_rthon_debug_debug_breakpoints(ow_device* dev, const char* lines)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\r\\j")) != OW_OK) return r;
+    if ((r = ow__cat_str(cmd, sizeof cmd, &pos, lines)) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_rthon_debug_debug_step(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\r\\e")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_rthon_debug_debug_continue(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\r\\f")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_rthon_debug_debug_pause(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\r\\g")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_rthon_debug_debug_stop(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\r\\t")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_scripting_rthon_debug_debug_locals(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "s\\r\\i")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_apps_launch_app(ow_device* dev, int32_t app_id)
 {
     char cmd[OW_CMD_MAX]; size_t pos = 0;
     char resp[OW_RESP_MAX];
     ow_status r;
     if ((r = ow__cat(cmd, sizeof cmd, &pos, "a\\a")) != OW_OK) return r;
+    if ((r = ow__cat_int(cmd, sizeof cmd, &pos, (long)app_id)) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
@@ -2360,6 +5988,17 @@ ow_status ow_linux_enable_linux_cpu(ow_device* dev)
     char resp[OW_RESP_MAX];
     ow_status r;
     if ((r = ow__cat(cmd, sizeof cmd, &pos, "l\\a")) != OW_OK) return r;
+    if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
+    (void)resp;
+    return OW_OK;
+}
+
+ow_status ow_linux_open_shell(ow_device* dev)
+{
+    char cmd[OW_CMD_MAX]; size_t pos = 0;
+    char resp[OW_RESP_MAX];
+    ow_status r;
+    if ((r = ow__cat(cmd, sizeof cmd, &pos, "l\\b")) != OW_OK) return r;
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;

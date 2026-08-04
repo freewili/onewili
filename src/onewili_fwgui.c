@@ -3,6 +3,9 @@
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "pico/time.h"
+#include "onewili_sd.h"
+#include "ow_sdfs_frame.h"
+#include "sdfs_wire.h"
 
 /* ── Link constants (FwGUI protocol; see the firmware's protocol.md) ───── */
 #define OWFW_BAUD          8000000
@@ -20,6 +23,9 @@
 #define OWFW_CHUNK_MAX     56      /* text bytes per event frame    */
 #define OWFW_CMD_RESPONSE  0x5D    /* FWGUI_API_ONEWILL_RESPONSE    */
 #define OWFW_CMD_BINARY    0x5E    /* FWGUI_API_ONEWILL_BINARY      */
+#define OWFW_CMD_SDFS      0x5F    /* FWGUI_API_SDFS_DATA           */
+#define OWFW_SDFS_SLOTS    8       /* SDFS RX frames buffered       */
+#define OWFW_SDFS_POLL_US  1000    /* an idle recv poll costs ~1 ms */
 #define OWFW_STREAM_MAX    1024    /* per-stream buffer             */
 #define OWFW_FRAME_MAX     512     /* incoming command frame payload cap */
 
@@ -49,6 +55,27 @@ static uint32_t fifo_pop(owfw_fifo* f, uint8_t* out, uint32_t cap) {
         f->count--;
     }
     return n;
+}
+
+/* ── SDFS frame ring ───────────────────────────────────────────────────── */
+/* SDFS responses (0x5F) are whole frames, not a byte stream, so they get a
+ * ring of complete frames rather than a FIFO. Drop-newest on overflow, counted
+ * with the other dropped frames. */
+typedef struct {
+    uint16_t len;
+    uint8_t  buf[SDFS_MAX_FRAME];
+} owfw_sdfs_slot;
+
+static owfw_sdfs_slot g_sdfs[OWFW_SDFS_SLOTS];
+static uint32_t       g_sdfs_head, g_sdfs_count;
+
+static void sdfs_push(const uint8_t* p, uint16_t n) {
+    owfw_sdfs_slot* s;
+    if (n > SDFS_MAX_FRAME || g_sdfs_count >= OWFW_SDFS_SLOTS) { g_dropped++; return; }
+    s = &g_sdfs[(g_sdfs_head + g_sdfs_count) % OWFW_SDFS_SLOTS];
+    memcpy(s->buf, p, n);
+    s->len = n;
+    g_sdfs_count++;
 }
 
 /* ── RX: BE BA command-frame parser ────────────────────────────────────── */
@@ -95,6 +122,7 @@ static void rx_byte(uint8_t b) {
         if (g_rx.ck == g_rx.sum && !g_rx.overlong) {
             if (g_rx.cmd == OWFW_CMD_RESPONSE) fifo_push_frame(&g_text, g_rx.payload, g_rx.len);
             else if (g_rx.cmd == OWFW_CMD_BINARY) fifo_push_frame(&g_binary, g_rx.payload, g_rx.len);
+            else if (g_rx.cmd == OWFW_CMD_SDFS) sdfs_push(g_rx.payload, g_rx.len);
             /* every other command code (GUI traffic) is discarded */
         }
         g_rx.st = RX_SYNC0;
@@ -127,7 +155,8 @@ static void owfw_send_chunk(const uint8_t* text, uint8_t n) {
     uart_write_blocking(uart0, f, k);
 }
 
-/* Generic B0 1D event frame: sync | len u16le (excludes event code) |
+/* LOCAL ADDITION — not in the generated package; re-apply after every re-copy.
+ * Generic B0 1D event frame: sync | len u16le (excludes event code) |
  * event code | payload | cksum u16le (additive sum over every preceding
  * byte). Fire-and-forget, like owfw_send_chunk — no response is read. */
 static void owfw_send_event(uint8_t event_code, const uint8_t* payload, uint8_t n) {
@@ -172,11 +201,61 @@ static int owfw_read_binary(void* ctx, uint8_t* buf, size_t cap, uint32_t timeou
     (void)ctx; return owfw_read_stream(&g_binary, buf, cap, timeout_ms);
 }
 
+/* ── SDFS transport (sdfslib client <-> the display link) ───────────────── */
+/* Request frames go out as B0 1D events (id 42), byte-identical to the stock
+ * display firmware; responses arrive as BE BA / 0x5F command frames. */
+static int owfw_sdfs_send(void* ctx, const uint8_t* frame, size_t len) {
+    uint8_t f[SDFS_MAX_FRAME + OW_SDFS_EVENT_OVERHEAD];
+    size_t n;
+    (void)ctx;
+    n = ow_sdfs_frame_event(f, sizeof f, frame, len);
+    if (n == 0) return -1;
+    uart_write_blocking(uart0, f, n);
+    return 0;
+}
+
+/* Non-blocking in the sdfslib sense: it returns 0 rather than a frame, but
+ * paces an empty poll to ~1 ms so the client's timeout_polls budget IS a
+ * millisecond budget (see onewili_sd.c:apply_timeout). Draining the shared
+ * parser here is what keeps OneWili text/binary events flowing while an SD
+ * call blocks. */
+static int owfw_sdfs_recv(void* ctx, uint8_t* buf, size_t cap, size_t* len) {
+    absolute_time_t deadline = make_timeout_time_us(OWFW_SDFS_POLL_US);
+    (void)ctx;
+    for (;;) {
+        owfw_sdfs_slot* s;
+        owfw_pump();
+        if (g_sdfs_count) {
+            s = &g_sdfs[g_sdfs_head];
+            g_sdfs_head = (g_sdfs_head + 1) % OWFW_SDFS_SLOTS;
+            g_sdfs_count--;
+            if (s->len > cap) return -1;
+            memcpy(buf, s->buf, s->len);
+            *len = s->len;
+            return 1;
+        }
+        if (time_reached(deadline)) return 0;
+    }
+}
+
+sdfs_transport_t ow_fwgui_sdfs_transport(void) {
+    sdfs_transport_t t;
+    t.send = owfw_sdfs_send;
+    t.recv = owfw_sdfs_recv;
+    t.ctx  = 0;
+    return t;
+}
+
 /* ── Public API ────────────────────────────────────────────────────────── */
 ow_status ow_open_fwgui(ow_device* dev) {
+    ow_status st;
+    sdfs_transport_t sd;
+    ow_transport t;
     memset(&g_rx, 0, sizeof g_rx);
     memset(&g_text, 0, sizeof g_text);
     memset(&g_binary, 0, sizeof g_binary);
+    memset(g_sdfs, 0, sizeof g_sdfs);
+    g_sdfs_head = g_sdfs_count = 0;
     g_dropped = 0;
     uart_init(uart0, 8000000);   /* OWFW_BAUD */
     gpio_set_function(OWFW_PIN_TX,  GPIO_FUNC_UART);
@@ -184,11 +263,16 @@ ow_status ow_open_fwgui(ow_device* dev) {
     gpio_set_function(OWFW_PIN_CTS, GPIO_FUNC_UART);
     gpio_set_function(OWFW_PIN_RTS, GPIO_FUNC_UART);
     uart_set_hw_flow(uart0, true, true);
-    ow_transport t;
     t.ctx = 0;
     t.write = owfw_write;
     t.read = owfw_read_text;
-    return ow_open(dev, &t);
+    st = ow_open(dev, &t);
+    if (st != OW_OK) return st;
+    /* Arm SD access (see onewili_sd.h). Failures here are not fatal: they just
+     * mean MAIN is not answering yet, and ow_sd_* calls will report it. */
+    sd = ow_fwgui_sdfs_transport();
+    (void)ow_sd_arm(&sd);
+    return OW_OK;
 }
 
 ow_transport ow_fwgui_binary_transport(void) {
@@ -201,6 +285,7 @@ ow_transport ow_fwgui_binary_transport(void) {
 
 uint32_t ow_fwgui_dropped_frames(void) { return g_dropped; }
 
+/* LOCAL ADDITION — not in the generated package; re-apply after every re-copy. */
 void ow_fwgui_send_power_zones(uint32_t zone_mask) {
     uint8_t payload[3] = {
         (uint8_t)(zone_mask & 0xFF),
