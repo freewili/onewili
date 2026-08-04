@@ -36,6 +36,30 @@ Poll events regularly: each stream buffers 1024 bytes and whole frames are
 dropped (counted by `ow_fwgui_dropped_frames()`) when a buffer is full.
 Logic-analyzer binary reports are never mirrored over the display link.
 
+## SD card
+
+The SD card is owned by the MAIN CPU. `ow_open_fwgui` arms an SD client that
+reaches it over the same display link, so a wilibsp app can read and write the
+card the same way the stock display firmware does:
+
+```c
+#include "onewili_sd.h"
+
+ow_sd_file f;
+if (ow_sd_open(&dev, &f, "/logs/run.txt", OW_SD_APPEND) == OW_OK) {
+    ow_sd_write(&f, "hello\n", 6);
+    if (ow_sd_close(&f) != OW_OK) { /* the write did not land -- see below */ }
+}
+```
+
+Paths are absolute and `/`-rooted (there is no internal-flash route). At most
+two files may be open at once. Writes are fire-and-forget, so **always check
+`ow_sd_close`** — that is where a dropped chunk is reported. `ow_sd_last_error()`
+gives the underlying sdfslib status; `ow_sd_set_timeout_ms()` changes the
+2-second idle timeout. Whole-file helpers (`ow_sd_get_mem`, `ow_sd_put_mem`)
+and metadata calls (`ow_sd_stat`, `ow_sd_list`, `ow_sd_mkdir`, `ow_sd_remove`,
+`ow_sd_rename`) need no handle.
+
 ## Build
 
 `CMakeLists.txt` builds a `onewili_fwgui` static library against the
