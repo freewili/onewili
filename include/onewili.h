@@ -602,6 +602,12 @@ ow_status ow_gui_dialogs_file_picker(ow_device* dev, int32_t mode, const char* s
 /* Events emitted by Dialogs: */
 /*   filepicked (text) - panel=decS32, control=decS32, picked=bool, path=string - File list / file picker result */
 #define OW_EVENT_GUI_DIALOGS_FILEPICKED "filepicked"
+/* Get Time. Read the current date and time from the board RTC (weekday 0=Sun..6=Sat).  Wire: h\t */
+ow_status ow_hardware_get_time(ow_device* dev, int32_t* year, int32_t* month, int32_t* day, int32_t* weekday, int32_t* hour, int32_t* min, int32_t* sec);
+
+/* Set Time. Set the board RTC date and time; the weekday is computed from the date.  Wire: h\c */
+ow_status ow_hardware_set_time(ow_device* dev, int32_t year, int32_t month, int32_t day, int32_t hour, int32_t min, int32_t sec);
+
 /* Software Reset. Performs a software reset of the device..  Wire: h\s\1 */
 ow_status ow_hardware_settings_home_software_reset(ow_device* dev);
 
@@ -1049,6 +1055,9 @@ ow_status ow_hardware_system_enable_battery_stream(ow_device* dev, int32_t enabl
 /* Read OTP Info. Reads bytes from the fused OTP identity blob (bl_otp_info v3). An unprovisioned device reads all zeros. Read in chunks of 256 bytes or less..  Wire: h\a\b */
 ow_status ow_hardware_system_read_otp_info(ow_device* dev, int32_t offset, int32_t length, uint8_t* otp_blob, size_t otp_blob_cap, size_t* otp_blob_len);
 
+/* Boot UF2. Reboots into the SBL bootloader, which chain-loads the named RAM-app UF2 from the SD card /update directory (card root as fallback). No response is sent on success — the device resets..  Wire: h\a\u */
+ow_status ow_hardware_system_boot_uf2(ow_device* dev, const char* filename);
+
 /* Device State. Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id). More space-separated fields may be appended later..  Wire: h\a\g */
 ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap);
 
@@ -1140,6 +1149,30 @@ ow_status ow_hardware_power_management_get_control_lines(ow_device* dev, bool* w
 /* Events emitted by Power Management: */
 /*   power (text) - soc=decS32, current_ma=decS32, remain_mah=decS32, full_mah=decS32, vbus_mv=decS32, vsys_mv=decS32, vbat_mv=decS32, ichg_ma=decS32, chg_stat=decS32, vbus_stat=decS32, fault=decS32, zone_mask=decU32, tier_main=decS32, tier_display=decS32, backlight=decS32, idle_ms=decS32, valid=bool - Power Telemetry */
 #define OW_EVENT_HARDWARE_POWER_MANAGEMENT_POWER "power"
+/* List Display Apps. Lists the firmware images available in the SD card /apps/ directory..  Wire: h\v\l */
+ow_status ow_hardware_display_functions_list_display_apps(ow_device* dev);
+
+/* Restore Display Firmware. Reflashes /apps/FW2Display.uf2 to restore the standard display GUI..  Wire: h\v\r */
+ow_status ow_hardware_display_functions_restore_display_firmware(ow_device* dev);
+
+/* Display Bootloader Version. Enters the display bootloader, reads its version, and releases the link without transferring anything..  Wire: h\v\v */
+ow_status ow_hardware_display_functions_display_bl_version(ow_device* dev);
+
+/* Reset Display CPU. Pulses the display processor reset so it cold-boots its flash image..  Wire: h\v\x */
+ow_status ow_hardware_display_functions_reset_display_cpu(ow_device* dev);
+
+/* Power Cycle Display. Cuts the display processor's power rail and restores it, giving a true power-on reset. Heavier than Reset Display CPU, which only pulses RUN. Bootloader entry uses RUN/BOOT on its own; use this when a warm reset is not enough..  Wire: h\v\c */
+ow_status ow_hardware_display_functions_power_cycle_display_cpu(ow_device* dev);
+
+/* Set RAM App Argument. Arms up to 128 bytes for the NEXT Run RAM App, placed at a fixed address near the top of the display's RAM window. Blank clears it. An armed argument makes the launch noticeably slower: the fused bootloader cannot seek, so the loader must pad the wire up to that address..  Wire: h\v\g */
+ow_status ow_hardware_display_functions_set_ram_app_arg(ow_device* dev, const char* text);
+
+/* Run PSRAM App. Runs /apps/<filename> on the display processor from PSRAM (0x11000000 window, up to 8 MB). Two-hop launch: a small SRAM stub is staged through the fused bootloader, then the stub receives the image into PSRAM and jumps to it. Flash is untouched; Reset Display CPU restores the stock firmware. The image must be a UF2 whose blocks target the PSRAM window..  Wire: h\v\p */
+ow_status ow_hardware_display_functions_run_psram_app(ow_device* dev, const char* filename);
+
+/* Load PSRAM Data. Stages /apps/<filename> verbatim into the display's PSRAM at <offset> bytes from 0x11000000, and leaves the loader stub running instead of launching anything. For bulk assets that would otherwise have to travel inside the app's own UF2. The file is taken as raw bytes: no UF2 decode. Repeat for as many blobs as needed, then Run PSRAM App -- the stub stays resident between calls, so only the first pays the two-hop entry, and the launch overwrites only what the app image itself covers. Staged data does NOT survive a display reset..  Wire: h\v\s */
+ow_status ow_hardware_display_functions_load_psram_data(ow_device* dev, const char* filename, uint32_t offset);
+
 /* Enable Reader. Enable/disable NFC reader with auto tag streaming.  Wire: w\n\r */
 ow_status ow_wireless_nfc_enable_reader(ow_device* dev, int32_t enable);
 
@@ -1340,6 +1373,30 @@ ow_status ow_wireless_ir_enable_ir_stream(ow_device* dev, int32_t enable);
 /* Send IR. Transmits a 4-byte IR code..  Wire: w\i\a */
 ow_status ow_wireless_ir_send_ir_data(ow_device* dev, int32_t ir_code);
 
+/* IR Self Test. Transmits one frame per supported protocol and checks that the on-board receiver decodes each one back. Takes a few seconds and emits infrared..  Wire: w\i\t */
+ow_status ow_wireless_ir_ir_self_test(ow_device* dev);
+
+/* List IR Dir. Lists the directories and .ir files on the SD card, directories first. Empty path lists \ir\..  Wire: w\i\l */
+ow_status ow_wireless_ir_ir_list_dir(ow_device* dev, const char* path);
+
+/* List IR Buttons. Lists the buttons in one Flipper .ir file with the index each one is sent by. Malformed entries are counted as skipped, not listed..  Wire: w\i\b */
+ow_status ow_wireless_ir_ir_list_buttons(ow_device* dev, const char* path);
+
+/* Send IR Button. Transmits one button from a .ir file, repeated by the IR Repeat setting. Emits infrared..  Wire: w\i\s */
+ow_status ow_wireless_ir_ir_send_button(ow_device* dev, int32_t index, const char* path);
+
+/* Save IR Capture. Appends the last received signal to \ir\learned.ir under this name, decoded when the protocol was recognised and as raw timings when it was not..  Wire: w\i\c */
+ow_status ow_wireless_ir_ir_save_capture(ow_device* dev, const char* name);
+
+/* IR Status. Reports the IR engine's carrier, repeat count, capture overruns and whether the \ir\ tree exists on the card..  Wire: w\i\i */
+ow_status ow_wireless_ir_ir_status(ow_device* dev);
+
+/* IR Carrier. Default transmit carrier frequency. Only these four are legal; a .ir raw entry with its own frequency line overrides this for that entry..  Wire: w\i\f */
+ow_status ow_wireless_ir_i_r_carrier(ow_device* dev, int32_t value);
+
+/* IR Repeat. How many times Send IR Button transmits each frame, 1 to 5, with a 40 ms gap between repeats..  Wire: w\i\r */
+ow_status ow_wireless_ir_i_r_repeat(ow_device* dev, int32_t value);
+
 
 /* Events emitted by IR Functions: */
 /*   irrx (text) - code=hexU32 - Received IR code */
@@ -1439,6 +1496,9 @@ ow_status ow_wireless_radio_monitor(ow_device* dev, int32_t on);
 #define OW_EVENT_WIRELESS_RADIO_RADIOASYNC "radioasync"
 /* Launch Script. Not yet implemented; always reports failure.  Wire: s\a */
 ow_status ow_scripting_launch_script(ow_device* dev);
+
+/* Power Cycle Debugger. Powers debugger zone 16 off for 500 ms, then powers it back on..  Wire: s\c */
+ow_status ow_scripting_power_cycle_debugger(ow_device* dev);
 
 
 /* Events emitted by Scripting Functions: */
@@ -1557,12 +1617,58 @@ ow_status ow_scripting_rthon_debug_debug_locals(ow_device* dev);
 /* Launch App. Switch the built-in display to the app with the given app ID.  Wire: a\a */
 ow_status ow_apps_launch_app(ow_device* dev, int32_t app_id);
 
+/* Run App. Runs /apps/<filename> on the display processor. The destination is inferred by reading the image, not the name: a UF2 whose blocks target SRAM is staged in RAM and launched; one targeting the PSRAM window (0x11000000) is staged into PSRAM through the loader stub and launched; anything else is written to flash. RAM and PSRAM launches leave flash untouched. A flash load takes 30-60 seconds with the screen blank..  Wire: a\r */
+ow_status ow_apps_run_app(ow_device* dev, const char* filename);
+
 /* Enable Linux CPU. Not yet implemented; always reports failure.  Wire: l\a */
 ow_status ow_linux_enable_linux_cpu(ow_device* dev);
 
 /* Open Shell.  Wire: l\b */
 ow_status ow_linux_open_shell(ow_device* dev);
 
+/* Start. Arms the logger with the current settings; Immediate trigger mode starts capturing at once. Emits logger events (armed/triggered/complete/error) as it runs..  Wire: r\s */
+ow_status ow_logger_start(ow_device* dev);
+
+/* Stop. Stops the logger: an armed capture is discarded, a running capture drains its remaining events to the files and closes them..  Wire: r\e */
+ow_status ow_logger_stop(ow_device* dev);
+
+/* Trigger. Software trigger: fires an armed capture regardless of the configured trigger mode..  Wire: r\t */
+ow_status ow_logger_trigger(ow_device* dev);
+
+/* Status. Prints the logger state, file format, trigger mode, output file names and event counters..  Wire: r\i */
+ow_status ow_logger_status(ow_device* dev);
+
+/* File Format. Output file format for the next capture: CSV text, RTIX binary, or both.  Wire: r\f */
+ow_status ow_logger_file_format(ow_device* dev, int32_t value);
+
+/* Trigger Mode. How an armed capture is triggered: Immediate (on start), Button (a device button press), or Expression (a device expression becoming nonzero).  Wire: r\m */
+ow_status ow_logger_trigger_mode(ow_device* dev, int32_t value);
+
+/* Trigger Button. Device button that fires the trigger in Button mode.  Wire: r\b */
+ow_status ow_logger_trigger_button(ow_device* dev, int32_t value);
+
+/* Trigger Expression. Expression evaluated every 50 ms in Expression mode; the trigger fires when it evaluates nonzero.  Wire: r\x */
+ow_status ow_logger_trigger_expression(ow_device* dev, const char* value);
+
+/* Pre Trigger Ms. Milliseconds of events kept from before the trigger (0-60000).  Wire: r\p */
+ow_status ow_logger_pre_trigger_ms(ow_device* dev, int32_t value);
+
+/* Post Trigger Ms. Milliseconds captured after the trigger before the files close (0 = until stop, max 600000).  Wire: r\o */
+ow_status ow_logger_post_trigger_ms(ow_device* dev, int32_t value);
+
+/* Events. Selects which events this instance captures: "all", "none", a comma-separated event-name list, or +name/-name to add/remove one event from the current selection.  Wire: r\v */
+ow_status ow_logger_events(ow_device* dev, const char* value);
+
+/* Active Instance. Selects which of the four logger instances (0-3) the settings rows show and the start, stop and trigger commands act on; every instance keeps its own saved configuration.  Wire: r\n */
+ow_status ow_logger_active_instance(ow_device* dev, int32_t value);
+
+/* Name. Optional name for this instance; captures are written to /logs/<name>/<name>_NNNN.* instead of /logs/logI_NNNN.*.  Wire: r\a */
+ow_status ow_logger_name(ow_device* dev, const char* value);
+
+
+/* Events emitted by Logger: */
+/*   logger (text) - info=string - Logger state change, prefixed with the instance number 0-3: <inst> armed, <inst> triggered, <inst> complete <csv> <rtix> <n> records, or <inst> error <reason> */
+#define OW_EVENT_LOGGER_LOGGER "logger"
 
 #ifdef __cplusplus
 }
