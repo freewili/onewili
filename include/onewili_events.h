@@ -112,6 +112,7 @@ typedef enum ow_event_kind {
     OW_EV_FUZZ = 50,   /* fuzz (diagnostic, text) */
     OW_EV_PUSH_SUB_MENU = 51,   /* pushSubMenu (diagnostic, text) */
     OW_EV_APP_SIGNAL = 52,   /* appSignal (stream, text) */
+    OW_EV_LOGGER = 53,   /* logger (protocol, text) */
 } ow_event_kind;
 
 typedef struct ow_event {
