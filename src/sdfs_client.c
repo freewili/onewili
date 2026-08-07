@@ -349,48 +349,121 @@ sdfs_status_t sdfs_hread(sdfs_client_t *c, uint8_t handle, uint8_t *dst,
     }
 }
 
-sdfs_status_t sdfs_hwrite(sdfs_client_t *c, uint8_t handle, const uint8_t *data, uint32_t len) {
-    /* One or more HWRITE_CHUNKs, each [handle][<=MAX_PAYLOAD-1 data]. The
-     * final chunk is flagged LAST and acknowledged by the server, providing
-     * one backpressure point per caller batch. */
-    uint32_t off = 0;
-    const uint32_t cap = (uint32_t)SDFS_MAX_PAYLOAD - 1u;
-    uint16_t final_rid = 0;
-    do {
-        uint32_t take = (len - off) < cap ? (len - off) : cap;
-        uint8_t body[SDFS_MAX_PAYLOAD];
-        body[0] = handle;
-        if (take) memcpy(&body[1], &data[off], take);
-        sdfs_header_t h = {0};
-        h.opcode = SDFS_OP_HWRITE_CHUNK; h.req_id = next_id(c);
-        if (off + take >= len) {
-            h.flags = SDFS_FLAG_LAST;
-            final_rid = h.req_id;
-        }
-        h.payload_len = (uint16_t)(1 + take);
-        int n = sdfs_encode(&h, NULL, body, c->buf, sizeof(c->buf));
-        if (n <= 0) return SDFS_ERR_BAD_REQUEST;
-        if (c->tp->send(c->tp->ctx, c->buf, (size_t)n) < 0) return SDFS_ERR_IO;
-        off += take;
-    } while (off < len);
+/* Wire bytes a single HWRITE_CHUNK costs the receiver, worst case:
+ *   SDFS header + handle byte + payload + the FwGUI event framing underneath.
+ * With SDFS_MAX_PAYLOAD 96 that is 11 + 1 + 95 + 7 = 114. */
+#ifndef SDFS_TRANSPORT_OVERHEAD
+#define SDFS_TRANSPORT_OVERHEAD 7u
+#endif
+#define SDFS_CHUNK_WIRE_BYTES \
+    (SDFS_HEADER_SIZE + 1u + ((uint32_t)SDFS_MAX_PAYLOAD - 1u) + SDFS_TRANSPORT_OVERHEAD)
 
+/* How many wire bytes may be in flight before we stop and take an ack.
+ *
+ * This exists because the receiver has ONE buffer and it is small. fw2main
+ * deliberately defeats RTS on this link -- it sets .bUseHwRxDMA and DMA-drains
+ * the UART RX FIFO "so this CPU's (sometimes slow) main loop can't stall the
+ * display's flow control" -- and a FIFO the DMA keeps empty never deasserts
+ * RTS. That leaves the 2048-byte DMA ring (rpSerialComm.h, kHwRxRingSize) as
+ * the only backpressure, which is 2.56 ms of wire time at 8 Mbaud. On overrun
+ * rxDataCount keeps the NEWEST ring-full and silently discards the oldest; it
+ * does not even bump g_uiSerialCommRxRingLaps, because that counter is only
+ * incremented on the PIO branch, not the hardware-UART one.
+ *
+ * 1254 is ~61 % of the ring, so a whole batch still fits even if MAIN stalls
+ * for the batch's entire transmission time. That specific figure is not round
+ * by accident: it is 11 chunks at SDFS_MAX_PAYLOAD 96, the batch size an
+ * application-level workaround used to complete a 1 MiB write on hardware
+ * before this was fixed here.
+ *
+ * Measured on FW2 v04 over SDFS: 1024 and 1254 perform the same (0.310 vs
+ * 0.312 MB/s SEQ 16K), so the value is chosen for the hardware provenance, not
+ * for throughput. Both are ~6 % below the same workload with the batching done
+ * by the caller instead (0.332); that gap is real and repeatable across runs
+ * but not yet explained -- the wire pattern should be equivalent. Worth
+ * chasing if write throughput ever matters more than it does today. */
+#ifndef SDFS_WRITE_INFLIGHT_BYTES
+#define SDFS_WRITE_INFLIGHT_BYTES 1254u
+#endif
+
+/* Wait for the RESULT/NACK belonging to req_id. */
+static sdfs_status_t hwrite_await_ack(sdfs_client_t *c, uint16_t req_id) {
     uint32_t polls = 0;
     for (;;) {
         size_t rl = 0;
         int r = c->tp->recv(c->tp->ctx, c->buf, sizeof(c->buf), &rl);
         if (r < 0) return SDFS_ERR_IO;
         if (r == 0) {
+            /* NOTE: unlike sdfs_hread/sdfs_list this does NOT reset the poll
+             * count on unrelated frames, so timeout_polls is a hard ceiling on
+             * silence rather than an idle timer. */
             if (++polls >= c->timeout_polls) return SDFS_ERR_TIMEOUT;
             continue;
         }
         sdfs_header_t rh; const char *p; const uint8_t *pay;
         if (sdfs_decode(c->buf, rl, &rh, &p, &pay) != 0) continue;
-        if (rh.req_id != final_rid) continue;
+        if (rh.req_id != req_id) continue;
         if (rh.opcode == SDFS_OP_NACK)
             return (sdfs_status_t)(rh.payload_len ? pay[0] : SDFS_ERR_IO);
         if (rh.opcode == SDFS_OP_RESULT && rh.payload_len == 1)
             return (sdfs_status_t)pay[0];
     }
+}
+
+sdfs_status_t sdfs_hwrite(sdfs_client_t *c, uint8_t handle, const uint8_t *data, uint32_t len) {
+    /* HWRITE_CHUNKs, each [handle][<=MAX_PAYLOAD-1 data], sent in batches of at
+     * most SDFS_WRITE_INFLIGHT_BYTES on the wire. The last chunk of every batch
+     * is flagged LAST and acknowledged before the next batch starts.
+     *
+     * This used to send the caller's ENTIRE payload as back-to-back chunks and
+     * ack only once at the very end. A 16 KiB write is 173 chunks = 19,722 wire
+     * bytes in flight against a 2048-byte ring (see above), so any card stall
+     * longer than 2.56 ms inside the burst ate bytes. When the discarded chunk
+     * was the one carrying SDFS_FLAG_LAST, the server never sent RESULT and the
+     * client burned its whole timeout -- surfacing as SDFS_ERR_TIMEOUT partway
+     * through a large write, immune to raising the timeout, and never on reads
+     * (the display's RX has no DMA, so its RTS really does throttle MAIN).
+     *
+     * The extra acks are the honest cost of writing this link; they are not
+     * overhead that could be optimised away without reintroducing the overrun.
+     */
+    const uint32_t cap = (uint32_t)SDFS_MAX_PAYLOAD - 1u;
+
+    uint32_t per_batch = SDFS_WRITE_INFLIGHT_BYTES / SDFS_CHUNK_WIRE_BYTES;
+    if (per_batch == 0) per_batch = 1;      /* always make progress */
+
+    uint32_t off = 0;
+    do {
+        uint32_t sent_in_batch = 0;
+        uint16_t batch_rid = 0;
+
+        /* Fill one batch. It ends either at the caller's length or at the
+         * in-flight budget, whichever comes first. */
+        do {
+            uint32_t take = (len - off) < cap ? (len - off) : cap;
+            uint8_t body[SDFS_MAX_PAYLOAD];
+            body[0] = handle;
+            if (take) memcpy(&body[1], &data[off], take);
+            sdfs_header_t h = {0};
+            h.opcode = SDFS_OP_HWRITE_CHUNK; h.req_id = next_id(c);
+            off += take;
+            sent_in_batch++;
+            if (off >= len || sent_in_batch >= per_batch) {
+                h.flags = SDFS_FLAG_LAST;
+                batch_rid = h.req_id;
+            }
+            h.payload_len = (uint16_t)(1 + take);
+            int n = sdfs_encode(&h, NULL, body, c->buf, sizeof(c->buf));
+            if (n <= 0) return SDFS_ERR_BAD_REQUEST;
+            if (c->tp->send(c->tp->ctx, c->buf, (size_t)n) < 0) return SDFS_ERR_IO;
+        } while (!batch_rid);
+
+        /* c->buf is reused for the reply, so the batch must be fully sent. */
+        sdfs_status_t st = hwrite_await_ack(c, batch_rid);
+        if (st != SDFS_OK) return st;
+    } while (off < len);
+
+    return SDFS_OK;
 }
 
 sdfs_status_t sdfs_seek(sdfs_client_t *c, uint8_t handle, uint32_t offset) {
