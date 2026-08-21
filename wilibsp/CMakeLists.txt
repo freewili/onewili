@@ -1,7 +1,4 @@
 # OneWili C API for WiliBSP (FreeWili 2 display CPU, RP2350B).
-# COPY — source of truth: freewili-firmware/freewilimain/testprojects/onewili/wilibsp (menutool-generated; re-copy on regeneration, do not edit here).
-# Local additions that survive a re-copy are tagged "LOCAL ADDITION" — grep for
-# it before and after regenerating: today that is ow_fwgui_send_power_zones().
 # Drop this directory into your wilibsp tree and add_subdirectory() it, or
 # point an out-of-tree app at it. Requires the pico-sdk (already initialized
 # by the wilibsp top-level CMakeLists).

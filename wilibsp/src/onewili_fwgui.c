@@ -155,10 +155,9 @@ static void owfw_send_chunk(const uint8_t* text, uint8_t n) {
     uart_write_blocking(uart0, f, k);
 }
 
-/* LOCAL ADDITION — not in the generated package; re-apply after every re-copy.
- * Generic B0 1D event frame: sync | len u16le (excludes event code) |
+/* Generic B0 1D event frame: sync | len u16le (excludes the event code) |
  * event code | payload | cksum u16le (additive sum over every preceding
- * byte). Fire-and-forget, like owfw_send_chunk — no response is read. */
+ * byte). Fire-and-forget, like owfw_send_chunk -- no response is read. */
 static void owfw_send_event(uint8_t event_code, const uint8_t* payload, uint8_t n) {
     uint8_t f[2 + 2 + 1 + 32 + 2];
     uint16_t len = (uint16_t)n;
@@ -285,7 +284,6 @@ ow_transport ow_fwgui_binary_transport(void) {
 
 uint32_t ow_fwgui_dropped_frames(void) { return g_dropped; }
 
-/* LOCAL ADDITION — not in the generated package; re-apply after every re-copy. */
 void ow_fwgui_send_power_zones(uint32_t zone_mask) {
     uint8_t payload[3] = {
         (uint8_t)(zone_mask & 0xFF),

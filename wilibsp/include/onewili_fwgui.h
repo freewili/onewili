@@ -30,10 +30,9 @@ uint32_t ow_fwgui_dropped_frames(void);
 #include "sdfs_transport.h"
 sdfs_transport_t ow_fwgui_sdfs_transport(void);
 
-/* LOCAL ADDITION — not in the generated package; re-apply after every re-copy.
- * Sends FWGUI_EVENT_POWER_ZONES (event 48) with the live rail mask so MAIN
+/* Sends FWGUI_EVENT_POWER_ZONES (event 48) with the live rail mask so MAIN
  * can (re)init anything gated on a zone, e.g. its CAN controller. Idempotent
- * fire-and-forget (no response is read) — call after open, on mask change,
+ * fire-and-forget (no response is read) -- call after open, on mask change,
  * and periodically, since MAIN can reboot independently of DISPLAY. */
 void ow_fwgui_send_power_zones(uint32_t zone_mask);
 
