@@ -1,0 +1,8 @@
+[package]
+name = "onewili"
+version = "0.1.0"
+edition = "2021"
+description = "OneWili API - generated Rust bindings for the FreeWili serial menu system"
+
+[dependencies]
+serialport = "4"

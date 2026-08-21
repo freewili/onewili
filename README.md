@@ -1,67 +1,90 @@
-# OneWili C API for WiliBSP
+# OneWili
 
-The full FreeWili OneWili command API for firmware running on the FreeWili 2
-**display CPU** (WiliBSP, RP2350B). The library is the same generated C
-package the PC serial target uses; only the transport differs: commands
-travel to the main CPU over the FwGUI display link (UART0, 8 Mbaud, hardware
-flow control on GPIO0-3) and responses/events travel back on the same link.
+The complete command API for [FREE-WILi](https://freewili.com) devices, in
+every language we ship it in.
 
-The main CPU must run the default FreeWili 2 firmware (which carries the
-OneWili display bridge).
+One device API, one wire protocol, 540 commands across 76 menus — everything
+the on-device menu system can do, callable from a PC, from another CPU on the
+board, or from a program running on the device itself.
 
-## Use
+**Reference documentation: <https://freewili.com/onewili/>**
+
+## Packages
+
+| Package | Language | Runs on | Talks to the device over |
+| --- | --- | --- | --- |
+| [`python/`](python) | Python 3.10+ | your PC | USB serial (auto-discovery via `pyfwfinder`) |
+| [`c/`](c) | C11 | your PC, or any host MCU | your own read/write callbacks; a Win32/POSIX serial one is included |
+| [`rust/`](rust) | Rust 2021 | your PC | USB serial (`serialport`) |
+| [`wilibsp/`](wilibsp) | C11 | the FreeWili 2 **display CPU** (RP2350B) | the FwGUI display link to the main CPU |
+| [`wasm/`](wasm) | C11 + Rust | inside the device's **WASM interpreter** | a single `ow_call` host import |
+| [`cm0/`](cm0) | C++ and Python | a **CM0 Linux host** | the FPGA mailbox console link |
+
+The first three are host packages — plug a FREE-WILi into a PC and drive it.
+The last three run *on* the hardware and reach the main CPU from wherever they
+happen to live.
+
+## Quick start
+
+Python:
+
+```bash
+cd python && pip install -e .
+```
+
+```python
+import onewili
+
+dev = onewili.connect()          # finds the board over USB
+dev.io.gpio.set_io_toggle(25)    # every firmware menu is an attribute
+```
+
+Rust:
+
+```bash
+cd rust && cargo run --example toggle_gpio_25
+```
+
+C:
+
+```bash
+cd c && cmake -S . -B build && cmake --build build
+```
 
 ```c
 #include "onewili.h"
-#include "onewili_fwgui.h"
 
 ow_device dev;
-ow_open_fwgui(&dev);                 /* UART0 + link handshake */
-/* any generated call, e.g.: */
-ow_io_gpio_set_io_toggle(&dev, 25);  /* toggles a MAIN-CPU gpio */
+ow_open(&dev, &my_transport);
+ow_io_gpio_set_io_toggle(&dev, 25);
 ```
 
-Text events arrive in-band — poll with `ow_poll_text_line(&dev, ...)`.
-Binary events (`onewili_binary.h`):
+Each package has its own `README.md` with the transport details, event
+handling and more examples.
 
-```c
-ow_binary_device bdev;
-ow_transport bt = ow_fwgui_binary_transport();
-ow_binary_open(&bdev, &bt);
-ow_event ev;
-while (ow_binary_poll(&bdev, &ev) == 1) { /* ... */ }
-```
+## Events
 
-Poll events regularly: each stream buffers 1024 bytes and whole frames are
-dropped (counted by `ow_fwgui_dropped_frames()`) when a buffer is full.
-Logic-analyzer binary reports are never mirrored over the display link.
+Every package can receive device events as well as send commands — text events
+(`[*id ...]`) and binary WILI frames both. They are poll-based everywhere; no
+package starts a thread behind your back. See the per-package README for the
+polling call and the typed event structs.
 
-## SD card
+## Generated code
 
-The SD card is owned by the MAIN CPU. `ow_open_fwgui` arms an SD client that
-reaches it over the same display link, so a wilibsp app can read and write the
-card the same way the stock display firmware does:
+Everything here except this file is generated from the FREE-WILi firmware's
+menu sources by the menutool API generator, so the bindings cannot drift from
+what the firmware actually accepts. **Do not edit the generated files** — a
+regeneration will overwrite them. Fixes belong in the firmware menu sources
+or in the generator.
 
-```c
-#include "onewili_sd.h"
+Command IDs are stable and append-only: a command keeps its numeric ID for
+life, and new commands are appended. Code compiled against an older release
+keeps working against newer firmware.
 
-ow_sd_file f;
-if (ow_sd_open(&dev, &f, "/logs/run.txt", OW_SD_APPEND) == OW_OK) {
-    ow_sd_write(&f, "hello\n", 6);
-    if (ow_sd_close(&f) != OW_OK) { /* the write did not land -- see below */ }
-}
-```
+The few deliberate hand-written additions carry a `LOCAL ADDITION` comment and
+are re-applied after each sync — grep for that tag before and after
+regenerating.
 
-Paths are absolute and `/`-rooted (there is no internal-flash route). At most
-two files may be open at once. Writes are fire-and-forget, so **always check
-`ow_sd_close`** — that is where a dropped chunk is reported. `ow_sd_last_error()`
-gives the underlying sdfslib status; `ow_sd_set_timeout_ms()` changes the
-2-second idle timeout. Whole-file helpers (`ow_sd_get_mem`, `ow_sd_put_mem`)
-and metadata calls (`ow_sd_stat`, `ow_sd_list`, `ow_sd_mkdir`, `ow_sd_remove`,
-`ow_sd_rename`) need no handle.
+## Support
 
-## Build
-
-`CMakeLists.txt` builds a `onewili_fwgui` static library against the
-pico-sdk. Link it from your wilibsp app target and add `include/` (PUBLIC,
-automatic via CMake). `examples/blink.c` is a minimal app body.
+Issues and questions: <https://github.com/freewili/onewili/issues>

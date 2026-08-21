@@ -1,0 +1,19 @@
+[project]
+name = "onewili"
+version = "0.1.0"
+description = "OneWili API - generated Python bindings for the FreeWili serial menu system"
+requires-python = ">=3.10"
+dependencies = ["pyserial==3.5", "pyfwfinder", "result"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["onewili*"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.mypy]
+strict = true
