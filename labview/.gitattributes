@@ -1,0 +1,19 @@
+# The generator emits LF on every platform (tools/gen_lv_api.py), so pin these
+# so a Windows checkout cannot reintroduce CRLF and make a regeneration look
+# like a diff. Without this, "regenerating changes nothing" is only true on
+# whichever machine last ran the generator.
+include/onewili_lv_api.h  text eol=lf
+src/onewili_lv_api.c      text eol=lf
+onewili_lv.def            text eol=lf
+docs/commands.md          text eol=lf
+
+# Hand-written sources, kept LF for the same reason: the test suite compares
+# bytes, and the POSIX build path has to see the same files.
+*.c    text eol=lf
+*.h    text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+
+# PowerShell is happier with CRLF on Windows and this one never leaves it.
+*.ps1  text eol=crlf

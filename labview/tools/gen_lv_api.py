@@ -9,6 +9,10 @@ writes:
     onewili_lv.def              the DLL export list (core + commands)
     docs/commands.md            VI name -> wire path -> description index
 
+Every artefact is written with LF endings on every platform: the repo's review
+model is "regenerating changes nothing", and that only holds if the output does
+not depend on the host's newline convention. See labview/.gitattributes.
+
 The generated ABI uses plain C base types only, because that is the subset
 LabVIEW's Import Shared Library Wizard and Call Library Function Node handle
 without ambiguity. The mapping is:
@@ -325,7 +329,7 @@ def main() -> int:
         h.append("")
     h += ["#endif /* ONEWILI_LV_API_H */", ""]
 
-    (LV / "include" / "onewili_lv_api.h").write_text("\n".join(h), encoding="utf-8")
+    (LV / "include" / "onewili_lv_api.h").write_text("\n".join(h), encoding="utf-8", newline="\n")
 
     # ---- source ----
     s = [BANNER, '#include "onewili_lv_internal.h"', ""]
@@ -352,7 +356,7 @@ def main() -> int:
         s.append("    return (int)r;")
         s.append("}")
         s.append("")
-    (LV / "src" / "onewili_lv_api.c").write_text("\n".join(s), encoding="utf-8")
+    (LV / "src" / "onewili_lv_api.c").write_text("\n".join(s), encoding="utf-8", newline="\n")
 
     # ---- .def ----
     core = re.findall(r"^int (owlv_\w+)\(", (LV / "include" / "onewili_lv.h")
@@ -360,7 +364,7 @@ def main() -> int:
     names = list(dict.fromkeys(core + [c["lv"] for c in commands]))
     d = ["LIBRARY onewili_lv", "EXPORTS"]
     d += [f"    {n}" for n in names]
-    (LV / "onewili_lv.def").write_text("\n".join(d) + "\n", encoding="utf-8")
+    (LV / "onewili_lv.def").write_text("\n".join(d) + "\n", encoding="utf-8", newline="\n")
 
     # ---- docs ----
     # Group by the wire path's menu prefix -- "i\g\t" and "i\g\s" are both the
@@ -407,7 +411,7 @@ def main() -> int:
             md.append(f"| `{cmd['lv']}` | {wire} | {desc} |")
         md.append("")
     (LV / "docs").mkdir(exist_ok=True)
-    (LV / "docs" / "commands.md").write_text("\n".join(md), encoding="utf-8")
+    (LV / "docs" / "commands.md").write_text("\n".join(md), encoding="utf-8", newline="\n")
 
     print(f"{len(commands)} commands -> include/onewili_lv_api.h, "
           f"src/onewili_lv_api.c, onewili_lv.def, docs/commands.md")
