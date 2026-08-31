@@ -1,0 +1,8 @@
+# Build trees and the DLLs they produce. Ship the binaries as release
+# artifacts rather than committing them: they are large, they are per-bitness,
+# and the whole package rebuilds from source in under a minute.
+build/
+build-*/
+bin/
+.pytest_cache/
+__pycache__/

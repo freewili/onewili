@@ -19,10 +19,11 @@ board, or from a program running on the device itself.
 | [`wilibsp/`](wilibsp) | C11 | the FreeWili 2 **display CPU** (RP2350B) | the FwGUI display link to the main CPU |
 | [`wasm/`](wasm) | C11 + Rust | inside the device's **WASM interpreter** | a single `ow_call` host import |
 | [`cm0/`](cm0) | C++ and Python | a **CM0 Linux host** | the FPGA mailbox console link |
+| [`labview/`](labview) | C11 -> DLL | your PC, in **LabVIEW** | USB serial, through a Call Library Function Node |
 
-The first three are host packages — plug a FREE-WILi into a PC and drive it.
-The last three run *on* the hardware and reach the main CPU from wherever they
-happen to live.
+The three host packages and `labview/` all run on a PC — plug a FREE-WILi in
+and drive it. `wilibsp/`, `wasm/` and `cm0/` run *on* the hardware and reach the
+main CPU from wherever they happen to live.
 
 ## Quick start
 
@@ -50,6 +51,15 @@ C:
 ```bash
 cd c && cmake -S . -B build && cmake --build build
 ```
+
+LabVIEW:
+
+```powershell
+cd labview && .uild.ps1
+```
+
+then **Tools >> Import >> Shared Library (.dll)** on `labview/include/onewili_lv.h`
+to generate a VI for every command. See [`labview/README.md`](labview/README.md).
 
 ```c
 #include "onewili.h"
