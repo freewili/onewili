@@ -49,7 +49,12 @@ class BinaryTransport:
         try:
             while self._running:
                 try:
-                    chunk = self._serial.read(4096)
+                    # see Transport._read_loop: one byte, then whatever is waiting
+                    chunk = self._serial.read(1)
+                    if chunk:
+                        waiting = self._serial.in_waiting
+                        if waiting:
+                            chunk += self._serial.read(waiting)
                 except Exception:
                     break
                 if not chunk:

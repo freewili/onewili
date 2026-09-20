@@ -68,4 +68,11 @@ impl<'a> ZoomIo<'a> {
         let _r = crate::transport::call(365 /* CMD_SCRIPTING_ZOOM_IO_STOP_ZIO */, &a)?;
         Ok(())
     }
+
+    /// Probe Exec Window. Stages a known pattern in ZoomIO's SCRATCH_X exec window, runs the full core1 launch sequence, and reads it back. Wire: `s\b\x`
+    pub fn exec_probe(&mut self) -> Result<(), OwError> {
+        let a = crate::transport::Args::new();
+        let _r = crate::transport::call(561 /* CMD_SCRIPTING_ZOOM_IO_EXEC_PROBE */, &a)?;
+        Ok(())
+    }
 }

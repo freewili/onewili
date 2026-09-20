@@ -5043,7 +5043,7 @@ ow_status ow_wireless_radio_packet_rx(ow_device* dev, int32_t on, int32_t freq_h
     return OW_OK;
 }
 
-ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap)
+ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap, int32_t* clksyshz)
 {
     (void)dev;
     uint8_t args[512]; int ao = 0;
@@ -5054,6 +5054,7 @@ ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_ca
     ow__take_str(ret, &ro, sd, (int)sd_cap);
     if (hoststream) *hoststream = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     ow__take_str(ret, &ro, activemask, (int)activemask_cap);
+    if (clksyshz) *clksyshz = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
     return OW_OK;
 }
 
@@ -6210,6 +6211,264 @@ ow_status ow_gui_reinit_lcd_panel(ow_device* dev, int32_t mode)
     ao = ow__pack_i32(args, ao, mode);
     uint8_t ret[512]; int rc;
     rc = ow_call(CMD_GUI_REINIT_LCD_PANEL, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_cdc_perf_cdc_perf_blast(ow_device* dev, int32_t bytes, int32_t chunk, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, bytes);
+    ao = ow__pack_i32(args, ao, chunk);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CDC_PERF_CDC_PERF_BLAST, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (bytes_out) *bytes_out = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (elapsed_us) *elapsed_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (crc32) *crc32 = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_cdc_perf_cdc_perf_echo(ow_device* dev, int32_t rounds, int32_t chunk, int32_t* rounds_out, int32_t* elapsed_us)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, rounds);
+    ao = ow__pack_i32(args, ao, chunk);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CDC_PERF_CDC_PERF_ECHO, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (rounds_out) *rounds_out = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (elapsed_us) *elapsed_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_cdc_perf_cdc_perf_sink(ow_device* dev, int32_t bytes, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, bytes);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CDC_PERF_CDC_PERF_SINK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (bytes_out) *bytes_out = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (elapsed_us) *elapsed_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (crc32) *crc32 = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_responder(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_RESPONDER, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_start_burst(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_START_BURST, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_clear_stats(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_CLEAR_STATS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_line_rate_percent(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_LINE_RATE_PERCENT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_start_flood(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_START_FLOOD, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_frame_size(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_FRAME_SIZE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_link_status(ow_device* dev, char* info, size_t info_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_LINK_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, info, (int)info_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_loopback(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_LOOPBACK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_set_dest_mac(ow_device* dev, const uint8_t* dest_mac, size_t dest_mac_len)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_bytes(args, ao, dest_mac, (uint32_t)dest_mac_len);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_SET_DEST_MAC, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_burst_count(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_BURST_COUNT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_send_count(ow_device* dev, int32_t count)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, count);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_SEND_COUNT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_start_periodic(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_START_PERIODIC, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_start_line_rate(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_START_LINE_RATE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_show_stats(ow_device* dev, char* stats, size_t stats_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_SHOW_STATS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, stats, (int)stats_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_frame_type(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_FRAME_TYPE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_period_us(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_PERIOD_US, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_payload_crc(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_PAYLOAD_CRC, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_eth_test_eth_test_stop(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_ETH_TEST_ETH_TEST_STOP, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_scripting_zoom_io_exec_probe(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_SCRIPTING_ZOOM_IO_EXEC_PROBE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_light_show_settings_brightness(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_SETTINGS_HOME_LIGHT_SHOW_SETTINGS_BRIGHTNESS, args, ao, ret, (int)sizeof ret);
     if (rc < 0) return OW_ERR_FAILED;
     return OW_OK;
 }

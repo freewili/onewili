@@ -58,6 +58,18 @@ void ow_close(ow_device* dev);
 int ow_poll_text_line(ow_device* dev, char* id, size_t id_cap,
                       char* args, size_t args_cap);
 
+/* Raw command hooks for pipelined callers (see onewili_fast.h in the WiliBSP
+ * package). ow_raw_send writes one command without waiting; each call to
+ * ow_raw_next_response returns the next response frame in arrival order
+ * (timeout 0 = only what has already arrived, OW_ERR_TIMEOUT otherwise).
+ * Response frames that ow_poll_text_line completes meanwhile are kept in a
+ * small stash for ow_raw_next_response instead of being discarded. Not
+ * reentrant with a generated (synchronous) call on the same device. */
+int       ow_raw_send(ow_device* dev, const char* cmd);
+ow_status ow_raw_next_response(ow_device* dev, char* resp, size_t cap, int* ok, uint32_t timeout_ms);
+void      ow_raw_stash_clear(void);
+unsigned  ow_raw_stash_lost_count(void);
+
 /* High. Sets a GPIO high.  Wire: i\g\s */
 ow_status ow_io_gpio_set_io_high(ow_device* dev, int32_t pin);
 
@@ -500,6 +512,69 @@ ow_status ow_io_nice_usb_niceusb_vid(ow_device* dev, int32_t value);
 
 /* niceusb PID. Forced USB product ID, used only while niceusb Force VID/PID is on..  Wire: i\n\p */
 ow_status ow_io_nice_usb_niceusb_pid(ow_device* dev, int32_t value);
+
+/* Blast. Streams Bytes of deterministic XORshift32 pattern data device-to-host as fast as possible in Chunk-sized writes. Prints the line <<<BLAST>>> before the raw binary begins. Returns bytes,elapsed_us,crc32 (CRC-32 of the payload).  Wire: i\y\b */
+ow_status ow_io_cdc_perf_cdc_perf_blast(ow_device* dev, int32_t bytes, int32_t chunk, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32);
+
+/* Sink. Receives exactly Bytes of raw binary host-to-device and CRC-32-accumulates them. Prints the line <<<SINK>>> when ready to receive. A 10 second inactivity timeout aborts with failure. Returns bytes,elapsed_us,crc32.  Wire: i\y\s */
+ow_status ow_io_cdc_perf_cdc_perf_sink(ow_device* dev, int32_t bytes, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32);
+
+/* Echo. Per round reads exactly Chunk raw bytes from the host then writes them back verbatim, Rounds times. Prints the line <<<ECHO>>> when ready for round 1. A 10 second inactivity timeout aborts with failure. Returns rounds,elapsed_us.  Wire: i\y\e */
+ow_status ow_io_cdc_perf_cdc_perf_echo(ow_device* dev, int32_t rounds, int32_t chunk, int32_t* rounds_out, int32_t* elapsed_us);
+
+/* Start Periodic. Starts the test-frame generator sending one frame every Period us (see setting u). Frames use the current Frame Size/Type/CRC settings and the destination MAC from command m. Refused while Loopback is on or on a build without the NCM stack.  Wire: i\t\p */
+ow_status ow_io_eth_test_eth_test_start_periodic(ow_device* dev);
+
+/* Start Flood. Starts the test-frame generator sending as fast as the USB link accepts (natural NTB backpressure paces it; submit failures are counted, not lost sequence numbers). Refused while Loopback is on.  Wire: i\t\f */
+ow_status ow_io_eth_test_eth_test_start_flood(ow_device* dev);
+
+/* Start Line Rate. Starts the test-frame generator at Line Rate % (setting e) of a 10 Mbit/s reference wire, using a token bucket that charges each frame its size plus 24 bytes of preamble/FCS/gap overhead. Refused while Loopback is on.  Wire: i\t\r */
+ow_status ow_io_eth_test_eth_test_start_line_rate(ow_device* dev);
+
+/* Start Burst. Starts the test-frame generator releasing Burst Count frames (setting n) every second, the first burst immediately. Refused while Loopback is on.  Wire: i\t\b */
+ow_status ow_io_eth_test_eth_test_start_burst(ow_device* dev);
+
+/* Send N Frames. Sends exactly Count test frames as fast as the link accepts, then stops by itself (Count 1 = one transmit). Counters keep running so the result can be read with Show Stats afterwards. Refused while Loopback is on.  Wire: i\t\o */
+ow_status ow_io_eth_test_eth_test_send_count(ow_device* dev, int32_t count);
+
+/* Stop. Stops the test-frame generator. Counters are kept (use Clear Stats to zero them); the responder and loopback settings are unaffected.  Wire: i\t\x */
+ow_status ow_io_eth_test_eth_test_stop(ow_device* dev);
+
+/* Show Stats. Prints one line of key=value counters: mode link TXf TXb TXfail TXfps TXkbps RXf RXb RXfps RXkbps gap lost crc under over other echoq echos echod. The fps/kbps values are 1 Hz rates; RXf counts received FWET test frames, other counts everything else (host OS chatter).  Wire: i\t\s */
+ow_status ow_io_eth_test_eth_test_show_stats(ow_device* dev, char* stats, size_t stats_cap);
+
+/* Clear Stats. Zeros every TX/RX/echo counter and restarts sequence-gap tracking. The generator, responder and link state are unaffected.  Wire: i\t\c */
+ow_status ow_io_eth_test_eth_test_clear_stats(ow_device* dev);
+
+/* Set Dest MAC. Sets the destination MAC for generated test frames (default FF FF FF FF FF FF broadcast). Takes effect at the next generator start. Not persisted across reboot.  Wire: i\t\m */
+ow_status ow_io_eth_test_eth_test_set_dest_mac(ow_device* dev, const uint8_t* dest_mac, size_t dest_mac_len);
+
+/* Link Status. Reports whether the USB network adapter is up (host selected the NCM data interface) plus the host-side MAC, device-side MAC and the device's static IP 10.55.0.2.  Wire: i\t\k */
+ow_status ow_io_eth_test_eth_test_link_status(ow_device* dev, char* info, size_t info_cap);
+
+/* Frame Size. Total Ethernet frame size in bytes for generated test frames (headers included, FCS excluded). The udp frame type needs at least 66 bytes for its headers and is raised to that silently.  Wire: i\t\i */
+ow_status ow_io_eth_test_frame_size(ow_device* dev, int32_t value);
+
+/* Period us. Microseconds between frames in Periodic mode (10000 = 100 frames per second).  Wire: i\t\u */
+ow_status ow_io_eth_test_period_us(ow_device* dev, int32_t value);
+
+/* Burst Count. Frames released in each one-second burst in Burst mode.  Wire: i\t\n */
+ow_status ow_io_eth_test_burst_count(ow_device* dev, int32_t value);
+
+/* Line Rate Percent. Percentage of the 10 Mbit/s reference wire rate for Line Rate mode.  Wire: i\t\e */
+ow_status ow_io_eth_test_line_rate_percent(ow_device* dev, int32_t value);
+
+/* Payload CRC. When on, each generated frame carries a CRC32 over its sequence/timestamp/fill so the host can prove payload integrity; costs a CRC pass per frame at high rates.  Wire: i\t\v */
+ow_status ow_io_eth_test_payload_crc(ow_device* dev);
+
+/* Responder. When on, the device answers as 10.55.0.2: ARP requests, ICMP echo (ping) and UDP echo on port 5556. Turn off to measure pure generator/counter behavior.  Wire: i\t\a */
+ow_status ow_io_eth_test_responder(ow_device* dev);
+
+/* Loopback. When on, EVERY received frame is echoed back with its MAC addresses swapped and the generator/responder are disabled (mutually exclusive). Always off after a reboot.  Wire: i\t\l */
+ow_status ow_io_eth_test_loopback(ow_device* dev);
+
+/* Frame Type. Carrier for generated test frames: raw = ethertype 0x88B5 (needs npcap/scapy on the host), udp = IPv4 broadcast 10.55.0.255 port 5555 (a plain host socket receives it).  Wire: i\t\t */
+ow_status ow_io_eth_test_frame_type(ow_device* dev, int32_t value);
 
 /* Set Board LED. Sets a led to a specific color.  Wire: g\s */
 ow_status ow_gui_set_led_color(ow_device* dev, int32_t ledindex, int32_t red, int32_t green, int32_t blue, int32_t duration, ow_ow_led_manager_led_mode mode);
@@ -1145,6 +1220,9 @@ ow_status ow_hardware_settings_home_light_show_settings_l_ed_strips_enabled(ow_d
 /* Roku LED Control. Allow a Roku remote to cycle LED show patterns.  Wire: h\s\l\i */
 ow_status ow_hardware_settings_home_light_show_settings_roku_led_control(ow_device* dev);
 
+/* Brightness. Onboard LED strip brightness divisor, 1 (brightest) to 16 (dimmest).  Wire: h\s\l\b */
+ow_status ow_hardware_settings_home_light_show_settings_brightness(ow_device* dev, int32_t value);
+
 /* Double Click Ms. Button double-click window in milliseconds (currently inert; the display uses a compile-time window).  Wire: h\s\x\c */
 ow_status ow_hardware_settings_home_interface_settings_double_click_ms(ow_device* dev, int32_t value);
 
@@ -1160,8 +1238,8 @@ ow_status ow_hardware_system_read_otp_info(ow_device* dev, int32_t offset, int32
 /* Boot UF2. Reboots into the SBL bootloader, which chain-loads the named RAM-app UF2 from the SD card /update directory (card root as fallback). No response is sent on success — the device resets..  Wire: h\a\u */
 ow_status ow_hardware_system_boot_uf2(ow_device* dev, const char* filename);
 
-/* Device State. Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id). More space-separated fields may be appended later..  Wire: h\a\g */
-ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap);
+/* Device State. Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id), clk_sys in Hz. More space-separated fields may be appended later..  Wire: h\a\g */
+ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap, int32_t* clksyshz);
 
 /* Event Host Streaming. Enables or disables streaming of events to the host. When disabled, stream-class events are suppressed at the host output; protocol events still flow. Same gate as control bytes 0x05 (off) and 0x06 (on)..  Wire: h\a\e */
 ow_status ow_hardware_system_event_host_streaming(ow_device* dev, int32_t enable, bool* enabled);
@@ -1737,6 +1815,9 @@ ow_status ow_scripting_zoom_io_run_zio(ow_device* dev, const char* path);
 
 /* Stop ZoomIO. Reset core1 to stop the running program.  Wire: s\b\s */
 ow_status ow_scripting_zoom_io_stop_zio(ow_device* dev);
+
+/* Probe Exec Window. Stages a known pattern in ZoomIO's SCRATCH_X exec window, runs the full core1 launch sequence, and reads it back.  Wire: s\b\x */
+ow_status ow_scripting_zoom_io_exec_probe(ow_device* dev);
 
 
 /* Events emitted by ZoomIO Functions: */

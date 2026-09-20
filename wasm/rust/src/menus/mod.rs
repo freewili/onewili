@@ -20,6 +20,8 @@ pub mod wil_eye;
 pub mod audio;
 pub mod serial_leds;
 pub mod nice_usb;
+pub mod cdc_perf;
+pub mod eth_test;
 pub mod gui;
 pub mod gui_panels;
 pub mod gui_controls;

@@ -1016,6 +1016,62 @@
         }
       ]
     },
+    "CdcPerf": {
+      "attributes": {},
+      "doc": "CDC Serial Performance",
+      "methods": [
+        {
+          "doc": "Blast\n\nStreams Bytes of deterministic XORshift32 pattern data device-to-host as fast as possible in Chunk-sized writes. Prints the line <<<BLAST>>> before the raw binary begins. Returns bytes,elapsed_us,crc32 (CRC-32 of the payload)\n\nDecimal: Total Bytes (1..134217728), Chunk Size (64..2048) Separated by Spaces",
+          "is_setting": false,
+          "name": "cdc_perf_blast",
+          "params": [
+            {
+              "name": "bytes",
+              "type": "int"
+            },
+            {
+              "name": "chunk",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "cdc_perf_blast(bytes: int, chunk: int) -> Result",
+          "wire": "i\\y\\b"
+        },
+        {
+          "doc": "Sink\n\nReceives exactly Bytes of raw binary host-to-device and CRC-32-accumulates them. Prints the line <<<SINK>>> when ready to receive. A 10 second inactivity timeout aborts with failure. Returns bytes,elapsed_us,crc32\n\nDecimal: Total Bytes to receive (1..134217728)",
+          "is_setting": false,
+          "name": "cdc_perf_sink",
+          "params": [
+            {
+              "name": "bytes",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "cdc_perf_sink(bytes: int) -> Result",
+          "wire": "i\\y\\s"
+        },
+        {
+          "doc": "Echo\n\nPer round reads exactly Chunk raw bytes from the host then writes them back verbatim, Rounds times. Prints the line <<<ECHO>>> when ready for round 1. A 10 second inactivity timeout aborts with failure. Returns rounds,elapsed_us\n\nDecimal: Rounds (1..100000), Chunk Size (1..512) Separated by Spaces",
+          "is_setting": false,
+          "name": "cdc_perf_echo",
+          "params": [
+            {
+              "name": "rounds",
+              "type": "int"
+            },
+            {
+              "name": "chunk",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "cdc_perf_echo(rounds: int, chunk: int) -> Result",
+          "wire": "i\\y\\e"
+        }
+      ]
+    },
     "DisplayFunctions": {
       "attributes": {},
       "doc": "Display Functions",
@@ -1433,6 +1489,209 @@
           "returns": "Result",
           "signature": "flash_status() -> Result",
           "wire": "w\\a\\s"
+        }
+      ]
+    },
+    "EthTest": {
+      "attributes": {},
+      "doc": "Ethernet Test",
+      "methods": [
+        {
+          "doc": "Start Periodic\n\nStarts the test-frame generator sending one frame every Period us (see setting u). Frames use the current Frame Size/Type/CRC settings and the destination MAC from command m. Refused while Loopback is on or on a build without the NCM stack",
+          "is_setting": false,
+          "name": "eth_test_start_periodic",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_periodic() -> Result",
+          "wire": "i\\t\\p"
+        },
+        {
+          "doc": "Start Flood\n\nStarts the test-frame generator sending as fast as the USB link accepts (natural NTB backpressure paces it; submit failures are counted, not lost sequence numbers). Refused while Loopback is on",
+          "is_setting": false,
+          "name": "eth_test_start_flood",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_flood() -> Result",
+          "wire": "i\\t\\f"
+        },
+        {
+          "doc": "Start Line Rate\n\nStarts the test-frame generator at Line Rate % (setting e) of a 10 Mbit/s reference wire, using a token bucket that charges each frame its size plus 24 bytes of preamble/FCS/gap overhead. Refused while Loopback is on",
+          "is_setting": false,
+          "name": "eth_test_start_line_rate",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_line_rate() -> Result",
+          "wire": "i\\t\\r"
+        },
+        {
+          "doc": "Start Burst\n\nStarts the test-frame generator releasing Burst Count frames (setting n) every second, the first burst immediately. Refused while Loopback is on",
+          "is_setting": false,
+          "name": "eth_test_start_burst",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_burst() -> Result",
+          "wire": "i\\t\\b"
+        },
+        {
+          "doc": "Send N Frames\n\nSends exactly Count test frames as fast as the link accepts, then stops by itself (Count 1 = one transmit). Counters keep running so the result can be read with Show Stats afterwards. Refused while Loopback is on\n\nDecimal: Frame Count (1..1000000)",
+          "is_setting": false,
+          "name": "eth_test_send_count",
+          "params": [
+            {
+              "name": "count",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "eth_test_send_count(count: int) -> Result",
+          "wire": "i\\t\\o"
+        },
+        {
+          "doc": "Stop\n\nStops the test-frame generator. Counters are kept (use Clear Stats to zero them); the responder and loopback settings are unaffected",
+          "is_setting": false,
+          "name": "eth_test_stop",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_stop() -> Result",
+          "wire": "i\\t\\x"
+        },
+        {
+          "doc": "Show Stats\n\nPrints one line of key=value counters: mode link TXf TXb TXfail TXfps TXkbps RXf RXb RXfps RXkbps gap lost crc under over other echoq echos echod. The fps/kbps values are 1 Hz rates; RXf counts received FWET test frames, other counts everything else (host OS chatter)",
+          "is_setting": false,
+          "name": "eth_test_show_stats",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_show_stats() -> Result",
+          "wire": "i\\t\\s"
+        },
+        {
+          "doc": "Clear Stats\n\nZeros every TX/RX/echo counter and restarts sequence-gap tracking. The generator, responder and link state are unaffected",
+          "is_setting": false,
+          "name": "eth_test_clear_stats",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_clear_stats() -> Result",
+          "wire": "i\\t\\c"
+        },
+        {
+          "doc": "Set Dest MAC\n\nSets the destination MAC for generated test frames (default FF FF FF FF FF FF broadcast). Takes effect at the next generator start. Not persisted across reboot\n\nHex: 6 Destination MAC Bytes Separated by Spaces",
+          "is_setting": false,
+          "name": "eth_test_set_dest_mac",
+          "params": [
+            {
+              "name": "dest_mac",
+              "type": "bytes | bytearray"
+            }
+          ],
+          "returns": "Result",
+          "signature": "eth_test_set_dest_mac(dest_mac: bytes | bytearray) -> Result",
+          "wire": "i\\t\\m"
+        },
+        {
+          "doc": "Link Status\n\nReports whether the USB network adapter is up (host selected the NCM data interface) plus the host-side MAC, device-side MAC and the device's static IP 10.55.0.2",
+          "is_setting": false,
+          "name": "eth_test_link_status",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_link_status() -> Result",
+          "wire": "i\\t\\k"
+        },
+        {
+          "doc": "Frame Size\n\nTotal Ethernet frame size in bytes for generated test frames (headers included, FCS excluded). The udp frame type needs at least 66 bytes for its headers and is raised to that silently",
+          "is_setting": true,
+          "name": "frame_size",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "frame_size(value: int) -> Result",
+          "wire": "i\\t\\i"
+        },
+        {
+          "doc": "Period us\n\nMicroseconds between frames in Periodic mode (10000 = 100 frames per second)",
+          "is_setting": true,
+          "name": "period_us",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "period_us(value: int) -> Result",
+          "wire": "i\\t\\u"
+        },
+        {
+          "doc": "Burst Count\n\nFrames released in each one-second burst in Burst mode",
+          "is_setting": true,
+          "name": "burst_count",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "burst_count(value: int) -> Result",
+          "wire": "i\\t\\n"
+        },
+        {
+          "doc": "Line Rate Percent\n\nPercentage of the 10 Mbit/s reference wire rate for Line Rate mode",
+          "is_setting": true,
+          "name": "line_rate_percent",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "line_rate_percent(value: int) -> Result",
+          "wire": "i\\t\\e"
+        },
+        {
+          "doc": "Payload CRC\n\nWhen on, each generated frame carries a CRC32 over its sequence/timestamp/fill so the host can prove payload integrity; costs a CRC pass per frame at high rates",
+          "is_setting": true,
+          "name": "payload_crc",
+          "params": [],
+          "returns": "Result",
+          "signature": "payload_crc() -> Result",
+          "wire": "i\\t\\v"
+        },
+        {
+          "doc": "Responder\n\nWhen on, the device answers as 10.55.0.2: ARP requests, ICMP echo (ping) and UDP echo on port 5556. Turn off to measure pure generator/counter behavior",
+          "is_setting": true,
+          "name": "responder",
+          "params": [],
+          "returns": "Result",
+          "signature": "responder() -> Result",
+          "wire": "i\\t\\a"
+        },
+        {
+          "doc": "Loopback\n\nWhen on, EVERY received frame is echoed back with its MAC addresses swapped and the generator/responder are disabled (mutually exclusive). Always off after a reboot",
+          "is_setting": true,
+          "name": "loopback",
+          "params": [],
+          "returns": "Result",
+          "signature": "loopback() -> Result",
+          "wire": "i\\t\\l"
+        },
+        {
+          "doc": "Frame Type\n\nCarrier for generated test frames: raw = ethertype 0x88B5 (needs npcap/scapy on the host), udp = IPv4 broadcast 10.55.0.255 port 5555 (a plain host socket receives it)",
+          "is_setting": true,
+          "name": "frame_type",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "frame_type(value: int) -> Result",
+          "wire": "i\\t\\t"
         }
       ]
     },
@@ -3386,6 +3645,8 @@
         "analog_out": "AnalogOut",
         "audio": "Audio",
         "canfd": "CANFD",
+        "cdc_perf": "CdcPerf",
+        "eth_test": "EthTest",
         "gpio": "GPIO",
         "i2c": "I2C",
         "logic_analyzer": "LogicAnalyzer",
@@ -3715,6 +3976,20 @@
           "returns": "Result",
           "signature": "roku_led_control() -> Result",
           "wire": "h\\s\\l\\i"
+        },
+        {
+          "doc": "Brightness\n\nOnboard LED strip brightness divisor, 1 (brightest) to 16 (dimmest)",
+          "is_setting": true,
+          "name": "brightness",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "brightness(value: int) -> Result",
+          "wire": "h\\s\\l\\b"
         }
       ]
     },
@@ -7251,7 +7526,7 @@
           "wire": "h\\a\\u"
         },
         {
-          "doc": "Device State\n\nReport the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id). More space-separated fields may be appended later.",
+          "doc": "Device State\n\nReport the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id), clk_sys in Hz. More space-separated fields may be appended later.",
           "is_setting": false,
           "name": "device_state",
           "params": [],
@@ -7821,7 +8096,7 @@
           "wire": "w\\w\\g"
         },
         {
-          "doc": "Connect to a Wifi Access Point\n\nConnect to a WAP with provided SSID and Password\n\nString: SSID, Password",
+          "doc": "Connect to a Wifi Access Point\n\nConnect to a WAP with provided SSID and Password\n\nSSID Password (quote if spaces, e.g. \"My Network\" password)",
           "is_setting": false,
           "name": "on_connect_to_station",
           "params": [
@@ -8214,6 +8489,15 @@
           "returns": "Result",
           "signature": "stop_zio() -> Result",
           "wire": "s\\b\\s"
+        },
+        {
+          "doc": "Probe Exec Window\n\nStages a known pattern in ZoomIO's SCRATCH_X exec window, runs the full core1 launch sequence, and reads it back\n\nProbe the SCRATCH_X execution window",
+          "is_setting": false,
+          "name": "exec_probe",
+          "params": [],
+          "returns": "Result",
+          "signature": "exec_probe() -> Result",
+          "wire": "s\\b\\x"
         }
       ]
     }

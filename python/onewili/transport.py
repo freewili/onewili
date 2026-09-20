@@ -213,7 +213,16 @@ class Transport:
                     time.sleep(0.01)
                 continue
             try:
-                chunk = self._serial.read(4096)
+                # read(1) returns as soon as one byte arrives (or the 100 ms
+                # timeout passes with nothing); the rest of what is already
+                # buffered follows without another wait. read(4096) instead
+                # sat out the whole timeout on every command, which put
+                # ~100 ms on each round trip.
+                chunk = self._serial.read(1)
+                if chunk:
+                    waiting = self._serial.in_waiting
+                    if waiting:
+                        chunk += self._serial.read(waiting)
             except Exception:
                 break
             if chunk:

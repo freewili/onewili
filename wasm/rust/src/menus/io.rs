@@ -85,4 +85,14 @@ impl<'a> Io<'a> {
     pub fn nice_usb(self) -> super::nice_usb::NiceUsb<'a> {
         super::nice_usb::NiceUsb { t: self.t }
     }
+
+    /// CDC Serial Performance sub-menu.
+    pub fn cdc_perf(self) -> super::cdc_perf::CdcPerf<'a> {
+        super::cdc_perf::CdcPerf { t: self.t }
+    }
+
+    /// Ethernet Test sub-menu.
+    pub fn eth_test(self) -> super::eth_test::EthTest<'a> {
+        super::eth_test::EthTest { t: self.t }
+    }
 }
