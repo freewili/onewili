@@ -263,6 +263,8 @@ void ow_close(ow_device* dev) {
     (void)dev->t.write(dev->t.ctx, reset, 1);
 }
 
+static void ow_raw_stash(const char* line);   /* LOCAL ADDITION, defined at the end */
+
 int ow_poll_text_line(ow_device* dev, char* id, size_t id_cap,
                       char* args, size_t args_cap) {
     if (!dev || !id || !args || id_cap == 0 || args_cap == 0)
@@ -274,6 +276,9 @@ int ow_poll_text_line(ow_device* dev, char* id, size_t id_cap,
         char linebuf[OW_RESP_MAX];
         ow_status r = ow__read_line(dev, linebuf, sizeof linebuf, 0);
         if (r != OW_OK && r != OW_ERR_TIMEOUT) return -(int)r;
+        /* LOCAL ADDITION: a pipelined caller (onewili_fast.c) may be waiting
+         * for this response; keep it for ow_raw_next_response. */
+        if (r == OW_OK) ow_raw_stash(linebuf);
         /* A non-event frame outside a call has no waiter: drop it. */
     }
     if (dev->evq_count == 0) return 0;
@@ -6418,4 +6423,59 @@ ow_status ow_logger_name(ow_device* dev, const char* value)
     if ((r = ow__call(dev, cmd, resp, sizeof resp)) != OW_OK) return r;
     (void)resp;
     return OW_OK;
+}
+
+/* LOCAL ADDITION - not in the generated package; re-apply after every re-copy.
+ * Raw hooks for pipelined callers (onewili_fast.c): send a command without
+ * waiting for its response, and fetch the next response frame while the
+ * usual event routing (ow__read_line -> evq) stays in place. Single-flight:
+ * do not interleave with a generated call on the same device. */
+int ow_raw_send(ow_device* dev, const char* cmd) {
+    uint8_t out[OW_CMD_MAX + 2];
+    size_t clen;
+    if (!dev || !cmd) return -(int)OW_ERR_ARG;
+    clen = strlen(cmd);
+    if (clen + 2 > sizeof out) return -(int)OW_ERR_ARG;
+    out[0] = 0x02;                          /* reset to root + quiet */
+    memcpy(out + 1, cmd, clen);
+    out[1 + clen] = (uint8_t)10;            /* newline */
+    if (dev->t.write(dev->t.ctx, out, clen + 2) < 0) return -(int)OW_ERR_IO;
+    return (int)(clen + 2);
+}
+
+/* Response frames that ow_poll_text_line completed while a pipelined caller
+ * had commands unanswered. Responses are short; longer ones are truncated. */
+#define OW_RAW_STASH_N    32
+#define OW_RAW_STASH_LINE 192
+static char     ow_raw_stash_buf[OW_RAW_STASH_N][OW_RAW_STASH_LINE];
+static unsigned ow_raw_stash_r, ow_raw_stash_n, ow_raw_stash_lost;
+
+static void ow_raw_stash(const char* line) {
+    unsigned w;
+    if (ow_raw_stash_n >= OW_RAW_STASH_N) { ow_raw_stash_lost++; return; }
+    w = (ow_raw_stash_r + ow_raw_stash_n) % OW_RAW_STASH_N;
+    strncpy(ow_raw_stash_buf[w], line, OW_RAW_STASH_LINE - 1);
+    ow_raw_stash_buf[w][OW_RAW_STASH_LINE - 1] = 0;
+    ow_raw_stash_n++;
+}
+
+void ow_raw_stash_clear(void) { ow_raw_stash_r = ow_raw_stash_n = 0; }
+unsigned ow_raw_stash_lost_count(void) { return ow_raw_stash_lost; }
+
+ow_status ow_raw_next_response(ow_device* dev, char* resp, size_t cap, int* ok, uint32_t timeout_ms) {
+    static char linebuf[OW_RESP_MAX];       /* single-flight; keeps 4 KB off the stack */
+    if (!dev || !resp || !ok) return OW_ERR_ARG;
+    if (ow_raw_stash_n) {
+        const char* line = ow_raw_stash_buf[ow_raw_stash_r];
+        ow_status r = ow__parse_frame(line, resp, cap, ok);
+        ow_raw_stash_r = (ow_raw_stash_r + 1) % OW_RAW_STASH_N;
+        ow_raw_stash_n--;
+        return r;
+    }
+    for (;;) {
+        ow_status r = ow__read_line(dev, linebuf, sizeof linebuf, timeout_ms);
+        if (r != OW_OK) return r;
+        if (!linebuf[0] || !ow__is_frame(linebuf)) continue;
+        return ow__parse_frame(linebuf, resp, cap, ok);
+    }
 }
