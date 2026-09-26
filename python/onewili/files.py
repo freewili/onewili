@@ -154,15 +154,20 @@ def _parse_frame(line: str, tag: str) -> "framing.ResponseFrame | None":
     """`line` as a framed <tag> response, or None if it isn't one (including
     event frames such as fdir, whose path is "*fdir", never a plain tag).
     Used for the COMPLETION frames (put's "x\\f" trailer, get's "x\\u"
-    trailer), whose tag is a fixed literal the firmware source hardcodes at
-    the printMenuResponse call site -- not derived from menu navigation --
-    so pinning to it exactly is safe and lets an unrelated framed response
-    be skipped rather than misread as this transfer's result."""
+    trailer). Older firmware printed those with the bare literal tag; current
+    firmware prints them through the menu's navigation prefix (that tag
+    preceded by "h" and a backslash), so the tag is matched exactly OR as
+    the last path segment, which still lets an unrelated framed response be
+    skipped rather than misread as this transfer's result."""
     try:
         frame = framing.ResponseFrame.parse(line)
     except ValueError:
         return None
-    return frame if frame.path == tag else None
+    # The firmware moved from a bare literal ("x\\f") to the navigation-
+    # prefixed form ("h\\x\\f") for these trailers; accept either spelling.
+    if frame.path == tag or frame.path.endswith("\\" + tag):
+        return frame
+    return None
 
 
 def _handshake_body(line: str) -> "str | None":
@@ -221,10 +226,18 @@ class Files:
     def __init__(self, device) -> None:
         self._device = device
 
+    @property
+    def framed(self):
+        """CRC-checked transfers through regular menu commands (USB or CM0)."""
+        from .framed_files import FramedFiles
+        return FramedFiles(self._device)
+
     def put(self, dev_path: str, data: bytes, progress=None) -> None:
         """Upload `data` to `dev_path` on the device. progress(done, total),
         if given, is called after every chunk written."""
         transport = self._device._transport
+        if getattr(transport, "framed_files", False):
+            return self.framed.put(dev_path, data, progress)
         payload = bytes(data)
         crc = zlib.crc32(payload) & 0xFFFFFFFF
         header = _build_put_header(dev_path, len(payload), crc)
@@ -283,6 +296,8 @@ class Files:
         """Download `dev_path` from the device. progress(done, total), if
         given, is called as payload bytes arrive."""
         transport = self._device._transport
+        if getattr(transport, "framed_files", False):
+            return self.framed.get(dev_path, progress)
         header = _build_get_header(dev_path)
 
         transport.flush_queues()
@@ -386,10 +401,14 @@ class Files:
 
     def put_file(self, host_path: "str | os.PathLike[str]", dev_path: str, progress=None) -> None:
         """Upload the contents of the host file at `host_path` to `dev_path`."""
+        if getattr(self._device._transport, "framed_files", False):
+            return self.framed.put_file(host_path, dev_path, progress)
         data = Path(host_path).read_bytes()
         self.put(dev_path, data, progress)
 
     def get_file(self, dev_path: str, host_path: "str | os.PathLike[str]", progress=None) -> None:
         """Download `dev_path` and write it to the host file at `host_path`."""
+        if getattr(self._device._transport, "framed_files", False):
+            return self.framed.get_file(dev_path, host_path, progress)
         data = self.get(dev_path, progress)
         Path(host_path).write_bytes(data)

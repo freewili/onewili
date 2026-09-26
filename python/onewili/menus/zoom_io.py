@@ -163,3 +163,17 @@ o 0   # stop streaming
             Result: Ok(None) or Err(message).
         """
         return self._call("s", [], [])
+
+    def exec_probe(self) -> Result:
+        r"""Probe Exec Window.
+
+        Wire: ``s\b\x``
+
+        Stages a known pattern in ZoomIO's SCRATCH_X exec window, runs the full core1 launch sequence, and reads it back
+
+        Probe the SCRATCH_X execution window
+
+        Returns:
+            Result: Ok(None) or Err(message).
+        """
+        return self._call("x", [], [])

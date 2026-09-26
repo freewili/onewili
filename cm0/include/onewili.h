@@ -58,6 +58,18 @@ void ow_close(ow_device* dev);
 int ow_poll_text_line(ow_device* dev, char* id, size_t id_cap,
                       char* args, size_t args_cap);
 
+/* Raw command hooks for pipelined callers (see onewili_fast.h in the WiliBSP
+ * package). ow_raw_send writes one command without waiting; each call to
+ * ow_raw_next_response returns the next response frame in arrival order
+ * (timeout 0 = only what has already arrived, OW_ERR_TIMEOUT otherwise).
+ * Response frames that ow_poll_text_line completes meanwhile are kept in a
+ * small stash for ow_raw_next_response instead of being discarded. Not
+ * reentrant with a generated (synchronous) call on the same device. */
+int       ow_raw_send(ow_device* dev, const char* cmd);
+ow_status ow_raw_next_response(ow_device* dev, char* resp, size_t cap, int* ok, uint32_t timeout_ms);
+void      ow_raw_stash_clear(void);
+unsigned  ow_raw_stash_lost_count(void);
+
 /* High. Sets a GPIO high.  Wire: i\g\s */
 ow_status ow_io_gpio_set_io_high(ow_device* dev, int32_t pin);
 
@@ -293,6 +305,12 @@ ow_status ow_io_canfd_read_can_registers(ow_device* dev, int32_t channel, uint32
 /* Set CAN Register. Sets a CAN controller register..  Wire: i\c\s */
 ow_status ow_io_canfd_set_can_register(ow_device* dev, int32_t channel, uint32_t start_address, int32_t byte_count, uint32_t word_to_write);
 
+/* Enable CAN(FD) Receive Queue. Enables or disables the on-device receive queue that receive_canfd (v) reads from..  Wire: i\c\e */
+ow_status ow_io_canfd_enable_canfd_receive_queue(ow_device* dev, int32_t channel, int32_t enabled);
+
+/* Receive CAN(FD). Pops the oldest received CAN(FD) frame from the on-device receive queue (frame=0 when empty)..  Wire: i\c\v */
+ow_status ow_io_canfd_receive_canfd(ow_device* dev, int32_t channel, bool* frame, int32_t* queued, int32_t* dropped, uint32_t* arb_id, int32_t* xtd_id, int32_t* can_fd, int32_t* timestamp_us, int32_t* dlc, uint8_t* data, size_t data_cap, size_t* data_len);
+
 
 /* Events emitted by CANFD Functions: */
 /*   can0 (text) - arb_id=string, data_bytes=hexbytes - CAN RX frame on channel 0 (hex arb id, 'x' suffix = extended, then hex data) */
@@ -501,6 +519,177 @@ ow_status ow_io_nice_usb_niceusb_vid(ow_device* dev, int32_t value);
 /* niceusb PID. Forced USB product ID, used only while niceusb Force VID/PID is on..  Wire: i\n\p */
 ow_status ow_io_nice_usb_niceusb_pid(ow_device* dev, int32_t value);
 
+/* Blast. Streams Bytes of deterministic XORshift32 pattern data device-to-host as fast as possible in Chunk-sized writes. Prints the line <<<BLAST>>> before the raw binary begins. Returns bytes,elapsed_us,crc32 (CRC-32 of the payload).  Wire: i\y\b */
+ow_status ow_io_cdc_perf_cdc_perf_blast(ow_device* dev, int32_t bytes, int32_t chunk, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32);
+
+/* Sink. Receives exactly Bytes of raw binary host-to-device and CRC-32-accumulates them. Prints the line <<<SINK>>> when ready to receive. A 10 second inactivity timeout aborts with failure. Returns bytes,elapsed_us,crc32.  Wire: i\y\s */
+ow_status ow_io_cdc_perf_cdc_perf_sink(ow_device* dev, int32_t bytes, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32);
+
+/* Echo. Per round reads exactly Chunk raw bytes from the host then writes them back verbatim, Rounds times. Prints the line <<<ECHO>>> when ready for round 1. A 10 second inactivity timeout aborts with failure. Returns rounds,elapsed_us.  Wire: i\y\e */
+ow_status ow_io_cdc_perf_cdc_perf_echo(ow_device* dev, int32_t rounds, int32_t chunk, int32_t* rounds_out, int32_t* elapsed_us);
+
+/* Status. Prints one line of key=value T1S engine status: state link plca plcaen id cnt to chipRev t1sTx t1sTxDrop t1sRx t1sRxDrop spiAbort errs evts faults lastErr lastEvt ... term tc10 wkgen wksrc. plca=1 means the PLCA cycle is locked; chipRev is 0 until the PHY initialized; tc10 is 0 awake / 1 sleep pending / 2 sleeping, wkgen counts TC10 wake generations requested, wksrc is the last wake source (bit1 MDI, bit0 WAKE_IN). Wire-parseable, append-only.  Wire: i\r\s */
+ow_status ow_io_t1s_t1s_status(ow_device* dev, char* status, size_t status_cap);
+
+/* Link Status. Reports the T1S link (up while the PHY is initialized and running), the engine state name and whether the NCM<->T1S bridge is on.  Wire: i\r\k */
+ow_status ow_io_t1s_t1s_link_status(ow_device* dev, char* info, size_t info_cap);
+
+/* Reinit PHY. Requests a full PHY reinit: RST pulse plus fresh TC6 init with the current PLCA settings (this is how Burst Max/Burst Timer changes take effect). Also enables the T1S engine and clears the FAULT retry budget; bring-up itself still waits for the IO-header rail (zone 6).  Wire: i\r\i */
+ow_status ow_io_t1s_t1s_reinit_phy(ow_device* dev);
+
+/* Clear Counters. Zeros the T1S TX/RX/drop/error counters (chip revision is kept). The engine state, link and bridge are unaffected.  Wire: i\r\c */
+ow_status ow_io_t1s_t1s_clear_counters(ow_device* dev);
+
+/* Register Read. Reads one 32-bit register from the LAN865x over the TC6 SPI protocol: MMS is the memory map selector (0..15), Address the 16-bit register address within it. Requires the PHY to be initialized and running.  Wire: i\r\g */
+ow_status ow_io_t1s_t1s_register_read(ow_device* dev, int32_t mms, uint32_t address, uint32_t* value);
+
+/* Bridge. When on, host NCM frames forward to the T1S wire and T1S frames forward to the host (the local classifier/responder/loopback step aside) and the host adapter's link mirrors the T1S link. Always off after a reboot.  Wire: i\r\b */
+ow_status ow_io_t1s_bridge(ow_device* dev);
+
+/* Start Periodic. Starts the test-frame generator sending one frame every Period us (see setting u). Frames use the current Frame Size/Type/CRC settings and the destination MAC from command m. Refused while Loopback is on or on a build without the NCM stack.  Wire: i\r\t\p */
+ow_status ow_io_t1s_eth_test_eth_test_start_periodic(ow_device* dev);
+
+/* Start Flood. Starts the test-frame generator sending as fast as the USB link accepts (natural NTB backpressure paces it; submit failures are counted, not lost sequence numbers). Refused while Loopback is on.  Wire: i\r\t\f */
+ow_status ow_io_t1s_eth_test_eth_test_start_flood(ow_device* dev);
+
+/* Start Line Rate. Starts the test-frame generator at Line Rate % (setting e) of a 10 Mbit/s reference wire, using a token bucket that charges each frame its size plus 24 bytes of preamble/FCS/gap overhead. Refused while Loopback is on.  Wire: i\r\t\r */
+ow_status ow_io_t1s_eth_test_eth_test_start_line_rate(ow_device* dev);
+
+/* Start Burst. Starts the test-frame generator releasing Burst Count frames (setting n) every second, the first burst immediately. Refused while Loopback is on.  Wire: i\r\t\b */
+ow_status ow_io_t1s_eth_test_eth_test_start_burst(ow_device* dev);
+
+/* Send N Frames. Sends exactly Count test frames as fast as the link accepts, then stops by itself (Count 1 = one transmit). Counters keep running so the result can be read with Show Stats afterwards. Refused while Loopback is on.  Wire: i\r\t\o */
+ow_status ow_io_t1s_eth_test_eth_test_send_count(ow_device* dev, int32_t count);
+
+/* Stop. Stops the test-frame generator. Counters are kept (use Clear Stats to zero them); the responder and loopback settings are unaffected.  Wire: i\r\t\x */
+ow_status ow_io_t1s_eth_test_eth_test_stop(ow_device* dev);
+
+/* Show Stats. Prints one line of key=value counters: mode link TXf TXb TXfail TXfps TXkbps RXf RXb RXfps RXkbps gap lost crc under over other echoq echos echod. The fps/kbps values are 1 Hz rates; RXf counts received FWET test frames, other counts everything else (host OS chatter).  Wire: i\r\t\s */
+ow_status ow_io_t1s_eth_test_eth_test_show_stats(ow_device* dev, char* stats, size_t stats_cap);
+
+/* Clear Stats. Zeros every TX/RX/echo counter and restarts sequence-gap tracking. The generator, responder and link state are unaffected.  Wire: i\r\t\c */
+ow_status ow_io_t1s_eth_test_eth_test_clear_stats(ow_device* dev);
+
+/* Set Dest MAC. Sets the destination MAC for generated test frames (default FF FF FF FF FF FF broadcast). Takes effect at the next generator start. Not persisted across reboot.  Wire: i\r\t\m */
+ow_status ow_io_t1s_eth_test_eth_test_set_dest_mac(ow_device* dev, const uint8_t* dest_mac, size_t dest_mac_len);
+
+/* Link Status. Reports whether the USB network adapter is up (host selected the NCM data interface) plus the host-side MAC, device-side MAC and the device's static IP 10.55.0.2.  Wire: i\r\t\k */
+ow_status ow_io_t1s_eth_test_eth_test_link_status(ow_device* dev, char* info, size_t info_cap);
+
+/* Frame Size. Total Ethernet frame size in bytes for generated test frames (headers included, FCS excluded). The udp frame type needs at least 66 bytes for its headers and is raised to that silently.  Wire: i\r\t\i */
+ow_status ow_io_t1s_eth_test_frame_size(ow_device* dev, int32_t value);
+
+/* Period us. Microseconds between frames in Periodic mode (10000 = 100 frames per second).  Wire: i\r\t\u */
+ow_status ow_io_t1s_eth_test_period_us(ow_device* dev, int32_t value);
+
+/* Burst Count. Frames released in each one-second burst in Burst mode.  Wire: i\r\t\n */
+ow_status ow_io_t1s_eth_test_burst_count(ow_device* dev, int32_t value);
+
+/* Line Rate Percent. Percentage of the 10 Mbit/s reference wire rate for Line Rate mode.  Wire: i\r\t\e */
+ow_status ow_io_t1s_eth_test_line_rate_percent(ow_device* dev, int32_t value);
+
+/* Payload CRC. When on, each generated frame carries a CRC32 over its sequence/timestamp/fill so the host can prove payload integrity; costs a CRC pass per frame at high rates.  Wire: i\r\t\v */
+ow_status ow_io_t1s_eth_test_payload_crc(ow_device* dev);
+
+/* Responder. When on, the device answers as 10.55.0.2: ARP requests, ICMP echo (ping) and UDP echo on port 5556. Turn off to measure pure generator/counter behavior. (Served by lwIP when compiled in -- FW2MAIN_LWIP builds answer through the Network (TCP/IP) menu's stack and this toggle only drives the legacy mini-responder on non-lwIP builds).  Wire: i\r\t\a */
+ow_status ow_io_t1s_eth_test_responder(ow_device* dev);
+
+/* Loopback. When on, EVERY received frame is echoed back with its MAC addresses swapped and the generator/responder are disabled (mutually exclusive). Always off after a reboot.  Wire: i\r\t\l */
+ow_status ow_io_t1s_eth_test_loopback(ow_device* dev);
+
+/* Frame Type. Carrier for generated test frames: raw = ethertype 0x88B5 (needs npcap/scapy on the host), udp = IPv4 broadcast 10.55.0.255 port 5555 (a plain host socket receives it).  Wire: i\r\t\t */
+ow_status ow_io_t1s_eth_test_frame_type(ow_device* dev, int32_t value);
+
+/* PLCAEnabled. When on, the PHY runs PLCA (collision-free round-robin transmit opportunities; the node with Local ID 0 coordinates the cycle). When off, the PHY falls back to CSMA/CD. Applied live to a running PHY.  Wire: i\r\p\a */
+ow_status ow_io_t1s_plca_p_lca_enabled(ow_device* dev);
+
+/* Local ID. This node's PLCA ID (0..254). ID 0 is the cycle coordinator -- exactly one node on the segment must be 0. Applied live to a running PHY.  Wire: i\r\p\l */
+ow_status ow_io_t1s_plca_local_id(ow_device* dev, int32_t value);
+
+/* Node Count. Number of transmit opportunities in each PLCA cycle (1..255); only meaningful on the coordinator (Local ID 0). Applied live to a running PHY.  Wire: i\r\p\n */
+ow_status ow_io_t1s_plca_node_count(ow_device* dev, int32_t value);
+
+/* TO Timer. PLCA transmit-opportunity timer in bit times (1..255, silicon default 32). Written directly to the PHY's PLCA_TOTMR register when it differs from 32. Applied live to a running PHY.  Wire: i\r\p\t */
+ow_status ow_io_t1s_plca_t_o_timer(ow_device* dev, int32_t value);
+
+/* Burst Max. Maximum extra packets this node may send in one transmit opportunity (0..255, 0 = burst off). Takes effect at the next PHY (re)init -- use Reinit PHY (i\r\i) to apply.  Wire: i\r\p\m */
+ow_status ow_io_t1s_plca_burst_max(ow_device* dev, int32_t value);
+
+/* Burst Timer. Idle time in bit times the PHY waits between burst packets before giving up the transmit opportunity (1..255). Takes effect at the next PHY (re)init -- use Reinit PHY (i\r\i) to apply.  Wire: i\r\p\b */
+ow_status ow_io_t1s_plca_burst_timer(ow_device* dev, int32_t value);
+
+/* Generate Wake. Emits a TC10 wake-up from the running LAN865x: a 1 ms DME wake burst onto the MDI (Forward to MDI) and/or a 90 us pulse on the WAKE_OUT pin (Forward to WAKE_OUT), per the settings below. The engine polls the PHY until the request completes (see Wake Status gen/done/timeout). Fails when the PHY is not in run, neither forward target is enabled, or a previous wake is still busy.  Wire: i\r\w\g */
+ow_status ow_io_t1s_tc10_t1s_tc10_generate_wake(ow_device* dev);
+
+/* Wake Status. Prints one line of key=value TC10 status: state (engine state, sleep while asleep) gen done busy timeout (wake generations requested/completed/in flight/expired) sleeps woke pulses (sleep entries, wake detections, local WAKE_IN pulses) src (last wake source: none/mdi/wakein/mdi+wakein) sts2 (raw PHY STS2) fwd wake (forward targets and wake sources as configured) inhdly (INH release delay code) sleepms (ms asleep, 0 when awake). Wire-parseable, append-only.  Wire: i\r\w\s */
+ow_status ow_io_t1s_tc10_t1s_tc10_wake_status(ow_device* dev, char* status, size_t status_cap);
+
+/* Enter Sleep. Puts the LAN865x into TC10 sleep with the configured wake sources (Wake on MDI / Wake on WAKE_IN) and forward targets. On Orca the PHY's INH output then cuts its own SPI/IRQ path, so the engine tears the link down after a short grace and parks in the sleep state until the chip wakes (MDI energy, a WAKE_IN pulse, Local Wake Pulse) or Cancel Sleep reinits it. Fails when the PHY is not in run or a sleep is already pending.  Wire: i\r\w\e */
+ow_status ow_io_t1s_tc10_t1s_tc10_enter_sleep(ow_device* dev);
+
+/* Local Wake Pulse. Drives a 200 us HIGH pulse on the PHY's WAKE_IN pin from the board's IO expander (which stays powered while the PHY sleeps). Only a sleeping PHY reacts (it wakes and the engine reinitializes it); harmless when awake. Fails if the expander is not configured or the I2C write fails.  Wire: i\r\w\w */
+ow_status ow_io_t1s_tc10_t1s_tc10_local_wake_pulse(ow_device* dev);
+
+/* Cancel Sleep. Abandons a pending sleep or leaves the sleep state by requesting a full PHY reinit (RST pulse + fresh init). Reports 'not sleeping' when no sleep is in progress.  Wire: i\r\w\c */
+ow_status ow_io_t1s_tc10_t1s_tc10_cancel_sleep(ow_device* dev);
+
+/* Forward to MDI. When on, Generate Wake (and a wake forwarded during sleep) puts a 1 ms wake burst onto the MDI so the far end of the T1S segment wakes. At least one of Forward to MDI / Forward to WAKE_OUT must be on for Generate Wake to do anything.  Wire: i\r\w\m */
+ow_status ow_io_t1s_tc10_forward_to_mdi(ow_device* dev);
+
+/* Forward to WAKE_OUT. When on, Generate Wake (and a wake forwarded during sleep) emits a 90 us pulse on the PHY's WAKE_OUT pin (routed to the header on Orca; the host cannot observe it). At least one of Forward to MDI / Forward to WAKE_OUT must be on for Generate Wake to do anything.  Wire: i\r\w\o */
+ow_status ow_io_t1s_tc10_forward_to_wakeout(ow_device* dev);
+
+/* Wake on MDI. When on, a sleeping PHY wakes on energy detected on the MDI (any activity, not only a TC10 wake burst). Applied at the next Enter Sleep.  Wire: i\r\w\a */
+ow_status ow_io_t1s_tc10_wake_on_mdi(ow_device* dev);
+
+/* Wake on WAKE_IN. When on, a sleeping PHY wakes on a HIGH pulse longer than 40 us on its WAKE_IN pin (Local Wake Pulse drives that pin from the IO expander). Applied at the next Enter Sleep.  Wire: i\r\w\n */
+ow_status ow_io_t1s_tc10_wake_on_wakein(ow_device* dev);
+
+/* Sleep Inhibit Delay. Delay before the PHY releases its INH output after entering sleep: 0 = 0 ms, 1 = 50 ms, 2 = 100 ms, 3 = 200 ms. On Orca INH powers the PHY's SPI/IRQ path, so this is how long the link stays reachable after Enter Sleep. Applied at the next Enter Sleep.  Wire: i\r\w\y */
+ow_status ow_io_t1s_tc10_sleep_inhibit_delay(ow_device* dev, int32_t value);
+
+/* Status. Prints one line of key=value TCP/IP stack status: lwip host up ncm_link ncm_mode ncm_ip ncm_mask ncm_gw ncm_mac ncm_dhcp t1s_link t1s_ip t1s_mask t1s_mac ncm_rx ncm_tx ncm_rxdrop ncm_txdrop t1s_rx t1s_tx t1s_rxdrop t1s_txdrop rx_nomem tcp_pcbs udp_pcbs tcp_echo udp_echo http mem_used mem_max pbuf_used pbuf_max bridge tcp_echo_bytes udp_sink echo_on http_on t1s_rxfilt. New keys are only ever APPENDED (host parsers key on names, never positions). lwip=0 means the stack is not compiled in; ncm_mode is static or dhcp, ncm_dhcp is off/init/discover/request/bound/renew/rebind/backoff/autoip/autoip-probe. Wire-parseable, append-only.  Wire: i\w\s */
+ow_status ow_io_net_net_status(ow_device* dev, char* status, size_t status_cap);
+
+/* Link Status. Reports the USB network adapter (NCM) link as lwIP sees it, the addressing mode, the current IP, the DHCP hostname and whether the NCM<->T1S bridge (which takes lwIP off both wires) is on.  Wire: i\w\l */
+ow_status ow_io_net_net_link_status(ow_device* dev, char* info, size_t info_cap);
+
+/* DHCP Renew. Asks the DHCP client on the USB network adapter to renew its lease now. Fails when NCM Mode is static or DHCP is not running.  Wire: i\w\r */
+ow_status ow_io_net_net_dhcp_renew(ow_device* dev);
+
+/* Ping. ICMP echo client: sends count (1..5, default 3) echo requests to the dotted-decimal IPv4 address one at a time with a 1 s timeout each and prints seq=N rtt_ms=X or seq=N timeout per request, then sent= recv= min/avg/max. Blocks the console for up to count seconds; the stack keeps being serviced meanwhile.  Wire: i\w\p */
+ow_status ow_io_net_net_ping(ow_device* dev, const char* ip, int32_t count, char* result, size_t result_cap);
+
+/* Clear Counters. Zeros the net rx/tx/drop counters, ring high-water marks, service counters and the lwIP memory max/error marks. Addresses, links and services are unaffected.  Wire: i\w\c */
+ow_status ow_io_net_net_clear_counters(ow_device* dev);
+
+/* Apply. Re-pushes the settings below into the stack (every setting change already applies live; this is for scripts and after a rejected address). Fails when an address does not parse -- the previous configuration stays live and the settings are resynced to it.  Wire: i\w\a */
+ow_status ow_io_net_net_apply(ow_device* dev);
+
+/* NCM Mode. Addressing mode of the USB network adapter: static uses NCM IP/Netmask/Gateway; dhcp runs the DHCP client (hostname freewili-xxxx) and falls back to an AutoIP 169.254.x.x address after 3 unanswered discovers. Applies live and persists.  Wire: i\w\m */
+ow_status ow_io_net_n_cm_mode(ow_device* dev, int32_t value);
+
+/* NCM IP. Static IPv4 address of the USB network adapter (dotted decimal, default 10.55.0.2 -- the host tests expect this). Ignored while NCM Mode is dhcp. Rejected (previous kept) if it does not parse.  Wire: i\w\i */
+ow_status ow_io_net_n_cmip(ow_device* dev, const char* value);
+
+/* NCM Netmask. Static netmask of the USB network adapter (dotted decimal, default 255.255.255.0). Ignored while NCM Mode is dhcp.  Wire: i\w\k */
+ow_status ow_io_net_n_cm_netmask(ow_device* dev, const char* value);
+
+/* NCM Gateway. Static default gateway on the USB network adapter (dotted decimal, default 10.55.0.1 = the host). Ignored while NCM Mode is dhcp.  Wire: i\w\g */
+ow_status ow_io_net_n_cm_gateway(ow_device* dev, const char* value);
+
+/* T1S IP. Static IPv4 address of the 10BASE-T1S port's own lwIP netif (dotted decimal, default 10.56.0.2; static only, no gateway, never the default route).  Wire: i\w\j */
+ow_status ow_io_net_t1sip(ow_device* dev, const char* value);
+
+/* T1S Netmask. Static netmask of the 10BASE-T1S port's own netif (dotted decimal, default 255.255.255.0).  Wire: i\w\u */
+ow_status ow_io_net_t1s_netmask(ow_device* dev, const char* value);
+
+/* Echo Servers. When on (default), the device runs the UDP echo server on port 5556, the UDP 5555 sink (swallows stray FWET test datagrams) and the TCP echo server on port 7 on every netif. Turning it off aborts live echo connections.  Wire: i\w\e */
+ow_status ow_io_net_echo_servers(ow_device* dev);
+
+/* HTTP Server. When on (default), the device serves an HTML status page on port 80 (GET /) and the plain-text Status line (GET /status).  Wire: i\w\t */
+ow_status ow_io_net_h_ttp_server(ow_device* dev);
+
 /* Set Board LED. Sets a led to a specific color.  Wire: g\s */
 ow_status ow_gui_set_led_color(ow_device* dev, int32_t ledindex, int32_t red, int32_t green, int32_t blue, int32_t duration, ow_ow_led_manager_led_mode mode);
 
@@ -543,6 +732,12 @@ ow_status ow_gui_panels_add_panel_picklist(ow_device* dev, bool use_tile, int32_
 
 /* Show Panel. Brings the panel with the given index to the front on the DISPLAY..  Wire: g\c\c */
 ow_status ow_gui_panels_show_panel(ow_device* dev, int32_t index);
+
+/* Set Menu Text. Sets a custom panel menu button label (up to 15 bytes)..  Wire: g\c\f */
+ow_status ow_gui_panels_set_menu_text(ow_device* dev, int32_t button, const char* text);
+
+/* Read Buttons. Returns and clears the panel and keypad button press bitmask..  Wire: g\c\e */
+ow_status ow_gui_panels_read_buttons(ow_device* dev, uint32_t* pressed);
 
 /* Add LED. Add a LED control to the panel..  Wire: g\b\a */
 ow_status ow_gui_controls_add_led(ow_device* dev, int32_t index, int32_t x, int32_t y, int32_t color, int32_t size, bool inital_value);
@@ -1145,6 +1340,9 @@ ow_status ow_hardware_settings_home_light_show_settings_l_ed_strips_enabled(ow_d
 /* Roku LED Control. Allow a Roku remote to cycle LED show patterns.  Wire: h\s\l\i */
 ow_status ow_hardware_settings_home_light_show_settings_roku_led_control(ow_device* dev);
 
+/* Brightness. Onboard LED strip brightness divisor, 1 (brightest) to 16 (dimmest).  Wire: h\s\l\b */
+ow_status ow_hardware_settings_home_light_show_settings_brightness(ow_device* dev, int32_t value);
+
 /* Double Click Ms. Button double-click window in milliseconds (currently inert; the display uses a compile-time window).  Wire: h\s\x\c */
 ow_status ow_hardware_settings_home_interface_settings_double_click_ms(ow_device* dev, int32_t value);
 
@@ -1160,8 +1358,8 @@ ow_status ow_hardware_system_read_otp_info(ow_device* dev, int32_t offset, int32
 /* Boot UF2. Reboots into the SBL bootloader, which chain-loads the named RAM-app UF2 from the SD card /update directory (card root as fallback). No response is sent on success — the device resets..  Wire: h\a\u */
 ow_status ow_hardware_system_boot_uf2(ow_device* dev, const char* filename);
 
-/* Device State. Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id). More space-separated fields may be appended later..  Wire: h\a\g */
-ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap);
+/* Device State. Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id), clk_sys in Hz. More space-separated fields may be appended later..  Wire: h\a\g */
+ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap, int32_t* clksyshz);
 
 /* Event Host Streaming. Enables or disables streaming of events to the host. When disabled, stream-class events are suppressed at the host output; protocol events still flow. Same gate as control bytes 0x05 (off) and 0x06 (on)..  Wire: h\a\e */
 ow_status ow_hardware_system_event_host_streaming(ow_device* dev, int32_t enable, bool* enabled);
@@ -1211,6 +1409,24 @@ ow_status ow_hardware_file_system_load_wili_project(ow_device* dev, const char* 
 
 /* SDCard Host Select. Connects the SD card to the main CPU (0) or the USB reader / PC (1)..  Wire: h\x\k */
 ow_status ow_hardware_file_system_set_sd_card_host(ow_device* dev, int32_t host);
+
+/* Begin File Read. Open an SD file for bounded framed reads. Paths are UTF-8 encoded as compact hex and must be absolute; the session expires after 30 seconds of inactivity..  Wire: h\x\0 */
+ow_status ow_hardware_file_system_begin_file_read(ow_device* dev, uint32_t session, const char* path_hex, int32_t* size);
+
+/* Begin File Write. Stage an upload beside its destination. Existing files are preserved until size and CRC32 validation succeeds. No raw USB mode is entered..  Wire: h\x\1 */
+ow_status ow_hardware_file_system_begin_file_write(ow_device* dev, uint32_t session, const char* path_hex, int32_t size, uint32_t crc32, bool overwrite, int32_t* size_out);
+
+/* Read File Chunk. Read the next 1 to 192 bytes as compact hex. Use the exact sequential offset; a dash means an empty file or EOF..  Wire: h\x\2 */
+ow_status ow_hardware_file_system_read_file_chunk(ow_device* dev, uint32_t session, int32_t offset, int32_t maximum, int32_t* count, char* data, size_t data_cap);
+
+/* Write File Chunk. Write the next 1 to 192 hex-encoded bytes. Duplicate or out-of-order chunks are rejected; never replay an ambiguous timeout..  Wire: h\x\3 */
+ow_status ow_hardware_file_system_write_file_chunk(ow_device* dev, uint32_t session, int32_t offset, const char* data, int32_t* position);
+
+/* Finish File Transfer. Verify the byte count, close the file and return CRC32. A complete verified upload is published; an incomplete or corrupt upload never replaces the destination..  Wire: h\x\4 */
+ow_status ow_hardware_file_system_finish_file_transfer(ow_device* dev, uint32_t session, int32_t* size, uint32_t* crc32);
+
+/* Cancel File Transfer. Close the matching transfer and remove its incomplete staging file. Other shell and menu sessions remain available..  Wire: h\x\5 */
+ow_status ow_hardware_file_system_cancel_file_transfer(ow_device* dev, uint32_t session);
 
 
 /* Events emitted by File System: */
@@ -1738,6 +1954,9 @@ ow_status ow_scripting_zoom_io_run_zio(ow_device* dev, const char* path);
 /* Stop ZoomIO. Reset core1 to stop the running program.  Wire: s\b\s */
 ow_status ow_scripting_zoom_io_stop_zio(ow_device* dev);
 
+/* Probe Exec Window. Stages a known pattern in ZoomIO's SCRATCH_X exec window, runs the full core1 launch sequence, and reads it back.  Wire: s\b\x */
+ow_status ow_scripting_zoom_io_exec_probe(ow_device* dev);
+
 
 /* Events emitted by ZoomIO Functions: */
 /*   zoomio (text) - data_bytes=hexbytes - ZoomIO received packet (hex bytes) */
@@ -1798,6 +2017,21 @@ ow_status ow_linux_enable_linux_cpu(ow_device* dev);
 
 /* Open Shell.  Wire: l\b */
 ow_status ow_linux_open_shell(ow_device* dev);
+
+/* Open Shell Session. Open a framed Linux shell without entering menu passthrough.  Wire: l\c */
+ow_status ow_linux_open_shell_session(ow_device* dev, uint32_t session, uint32_t* session_out);
+
+/* Close Shell Session. Release the framed Linux shell and terminate its session.  Wire: l\e */
+ow_status ow_linux_close_shell_session(ow_device* dev, uint32_t session);
+
+/* Write Shell Session. Queue up to 192 shell bytes and return the accepted byte count.  Wire: l\w */
+ow_status ow_linux_write_shell_session(ow_device* dev, uint32_t session, const char* data, int32_t* accepted);
+
+/* Read Shell Session. Read bounded shell output as hexadecimal inside a normal menu response.  Wire: l\r */
+ow_status ow_linux_read_shell_session(ow_device* dev, uint32_t session, int32_t maximum, int32_t* count, char* data, size_t data_cap, bool* running);
+
+/* CM0 USB Mode. Query or switch CM0 USB between PC gadget and USB-A Port 3 host; requires CM0 image support.  Wire: l\u */
+ow_status ow_linux_cm0_usb_mode(ow_device* dev, const char* mode, char* mode_out, size_t mode_out_cap, bool* switchable);
 
 /* Start. Arms the logger with the current settings; Immediate trigger mode starts capturing at once. Emits logger events (armed/triggered/complete/error) as it runs..  Wire: r\s */
 ow_status ow_logger_start(ow_device* dev);

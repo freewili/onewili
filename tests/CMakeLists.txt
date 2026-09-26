@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(onewili_runtime_tests LANGUAGES C)
+enable_testing()
+set(ONEWILI_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(../c onewili)
+add_executable(test_binary_stream test_binary_stream.c)
+target_link_libraries(test_binary_stream PRIVATE onewili)
+add_test(NAME binary_stream COMMAND test_binary_stream)

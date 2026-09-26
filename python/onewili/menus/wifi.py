@@ -96,7 +96,7 @@ class Wifi(MenuBase):
 
         Connect to a WAP with provided SSID and Password
 
-        String: SSID, Password
+        SSID Password (quote if spaces, e.g. "My Network" password)
 
         Args:
             ssid: ssid (string).

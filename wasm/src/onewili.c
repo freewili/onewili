@@ -5043,7 +5043,7 @@ ow_status ow_wireless_radio_packet_rx(ow_device* dev, int32_t on, int32_t freq_h
     return OW_OK;
 }
 
-ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap)
+ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_cap, bool* hoststream, char* activemask, size_t activemask_cap, int32_t* clksyshz)
 {
     (void)dev;
     uint8_t args[512]; int ao = 0;
@@ -5054,6 +5054,7 @@ ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_ca
     ow__take_str(ret, &ro, sd, (int)sd_cap);
     if (hoststream) *hoststream = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     ow__take_str(ret, &ro, activemask, (int)activemask_cap);
+    if (clksyshz) *clksyshz = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
     return OW_OK;
 }
 
@@ -6211,6 +6212,866 @@ ow_status ow_gui_reinit_lcd_panel(ow_device* dev, int32_t mode)
     uint8_t ret[512]; int rc;
     rc = ow_call(CMD_GUI_REINIT_LCD_PANEL, args, ao, ret, (int)sizeof ret);
     if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_cdc_perf_cdc_perf_blast(ow_device* dev, int32_t bytes, int32_t chunk, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, bytes);
+    ao = ow__pack_i32(args, ao, chunk);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CDC_PERF_CDC_PERF_BLAST, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (bytes_out) *bytes_out = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (elapsed_us) *elapsed_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (crc32) *crc32 = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_cdc_perf_cdc_perf_echo(ow_device* dev, int32_t rounds, int32_t chunk, int32_t* rounds_out, int32_t* elapsed_us)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, rounds);
+    ao = ow__pack_i32(args, ao, chunk);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CDC_PERF_CDC_PERF_ECHO, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (rounds_out) *rounds_out = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (elapsed_us) *elapsed_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_cdc_perf_cdc_perf_sink(ow_device* dev, int32_t bytes, int32_t* bytes_out, int32_t* elapsed_us, uint32_t* crc32)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, bytes);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CDC_PERF_CDC_PERF_SINK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (bytes_out) *bytes_out = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (elapsed_us) *elapsed_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (crc32) *crc32 = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_responder(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_RESPONDER, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_start_burst(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_START_BURST, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_clear_stats(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_CLEAR_STATS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_line_rate_percent(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_LINE_RATE_PERCENT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_start_flood(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_START_FLOOD, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_frame_size(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_FRAME_SIZE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_link_status(ow_device* dev, char* info, size_t info_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_LINK_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, info, (int)info_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_loopback(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_LOOPBACK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_set_dest_mac(ow_device* dev, const uint8_t* dest_mac, size_t dest_mac_len)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_bytes(args, ao, dest_mac, (uint32_t)dest_mac_len);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_SET_DEST_MAC, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_burst_count(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_BURST_COUNT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_send_count(ow_device* dev, int32_t count)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, count);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_SEND_COUNT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_start_periodic(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_START_PERIODIC, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_start_line_rate(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_START_LINE_RATE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_show_stats(ow_device* dev, char* stats, size_t stats_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_SHOW_STATS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, stats, (int)stats_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_frame_type(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_FRAME_TYPE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_period_us(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_PERIOD_US, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_payload_crc(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_PAYLOAD_CRC, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_eth_test_eth_test_stop(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_ETH_TEST_ETH_TEST_STOP, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_scripting_zoom_io_exec_probe(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_SCRIPTING_ZOOM_IO_EXEC_PROBE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_hardware_settings_home_light_show_settings_brightness(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_SETTINGS_HOME_LIGHT_SHOW_SETTINGS_BRIGHTNESS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_bridge(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_BRIDGE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_t1s_clear_counters(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_T1S_CLEAR_COUNTERS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_t1s_register_read(ow_device* dev, int32_t mms, uint32_t address, uint32_t* value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, mms);
+    ao = ow__pack_u32(args, ao, address);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_T1S_REGISTER_READ, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (value) *value = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_t1s_reinit_phy(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_T1S_REINIT_PHY, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_t1s_link_status(ow_device* dev, char* info, size_t info_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_T1S_LINK_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, info, (int)info_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_plca_p_lca_enabled(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_PLCA_P_LCA_ENABLED, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_plca_burst_timer(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_PLCA_BURST_TIMER, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_plca_local_id(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_PLCA_LOCAL_ID, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_plca_burst_max(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_PLCA_BURST_MAX, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_plca_node_count(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_PLCA_NODE_COUNT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_plca_t_o_timer(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_PLCA_T_O_TIMER, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_t1s_status(ow_device* dev, char* status, size_t status_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_T1S_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, status, (int)status_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_wake_on_mdi(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_WAKE_ON_MDI, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_t1s_tc10_cancel_sleep(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_T1S_TC10_CANCEL_SLEEP, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_t1s_tc10_enter_sleep(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_T1S_TC10_ENTER_SLEEP, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_t1s_tc10_generate_wake(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_T1S_TC10_GENERATE_WAKE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_forward_to_mdi(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_FORWARD_TO_MDI, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_wake_on_wakein(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_WAKE_ON_WAKEIN, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_forward_to_wakeout(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_FORWARD_TO_WAKEOUT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_t1s_tc10_wake_status(ow_device* dev, char* status, size_t status_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_T1S_TC10_WAKE_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, status, (int)status_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_t1s_tc10_local_wake_pulse(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_T1S_TC10_LOCAL_WAKE_PULSE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_t1s_tc10_sleep_inhibit_delay(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_T1S_TC10_SLEEP_INHIBIT_DELAY, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_net_apply(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_NET_APPLY, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_net_clear_counters(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_NET_CLEAR_COUNTERS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_echo_servers(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_ECHO_SERVERS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_n_cm_gateway(ow_device* dev, const char* value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_N_CM_GATEWAY, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_n_cmip(ow_device* dev, const char* value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_N_CMIP, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_t1sip(ow_device* dev, const char* value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_T1SIP, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_n_cm_netmask(ow_device* dev, const char* value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_N_CM_NETMASK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_net_link_status(ow_device* dev, char* info, size_t info_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_NET_LINK_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, info, (int)info_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_net_n_cm_mode(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_N_CM_MODE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_net_ping(ow_device* dev, const char* ip, int32_t count, char* result, size_t result_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, ip);
+    ao = ow__pack_i32(args, ao, count);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_NET_PING, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, result, (int)result_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_net_net_dhcp_renew(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_NET_DHCP_RENEW, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_net_status(ow_device* dev, char* status, size_t status_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_NET_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, status, (int)status_cap);
+    return OW_OK;
+}
+
+ow_status ow_io_net_h_ttp_server(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_H_TTP_SERVER, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_net_t1s_netmask(ow_device* dev, const char* value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_NET_T1S_NETMASK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_enable_canfd_receive_queue(ow_device* dev, int32_t channel, int32_t enabled)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, channel);
+    ao = ow__pack_i32(args, ao, enabled);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ENABLE_CANFD_RECEIVE_QUEUE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_receive_canfd(ow_device* dev, int32_t channel, bool* frame, int32_t* queued, int32_t* dropped, uint32_t* arb_id, int32_t* xtd_id, int32_t* can_fd, int32_t* timestamp_us, int32_t* dlc, uint8_t* data, size_t data_cap, size_t* data_len)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, channel);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_RECEIVE_CANFD, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (frame) *frame = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
+    if (queued) *queued = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (dropped) *dropped = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (arb_id) *arb_id = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    if (xtd_id) *xtd_id = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (can_fd) *can_fd = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (timestamp_us) *timestamp_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (dlc) *dlc = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    ow__take_bytes(ret, &ro, data, (int)data_cap, (int*)data_len);
+    return OW_OK;
+}
+
+ow_status ow_gui_panels_read_buttons(ow_device* dev, uint32_t* pressed)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_GUI_PANELS_READ_BUTTONS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (pressed) *pressed = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_gui_panels_set_menu_text(ow_device* dev, int32_t button, const char* text)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, button);
+    ao = ow__pack_str(args, ao, text);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_GUI_PANELS_SET_MENU_TEXT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_linux_open_shell_session(ow_device* dev, uint32_t session, uint32_t* session_out)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_LINUX_OPEN_SHELL_SESSION, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (session_out) *session_out = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_linux_close_shell_session(ow_device* dev, uint32_t session)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_LINUX_CLOSE_SHELL_SESSION, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_linux_read_shell_session(ow_device* dev, uint32_t session, int32_t maximum, int32_t* count, char* data, size_t data_cap, bool* running)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    ao = ow__pack_i32(args, ao, maximum);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_LINUX_READ_SHELL_SESSION, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (count) *count = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    ow__take_str(ret, &ro, data, (int)data_cap);
+    if (running) *running = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_linux_write_shell_session(ow_device* dev, uint32_t session, const char* data, int32_t* accepted)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    ao = ow__pack_str(args, ao, data);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_LINUX_WRITE_SHELL_SESSION, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (accepted) *accepted = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_begin_file_read(ow_device* dev, uint32_t session, const char* path_hex, int32_t* size)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    ao = ow__pack_str(args, ao, path_hex);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_FILE_SYSTEM_BEGIN_FILE_READ, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (size) *size = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_begin_file_write(ow_device* dev, uint32_t session, const char* path_hex, int32_t size, uint32_t crc32, bool overwrite, int32_t* size_out)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    ao = ow__pack_str(args, ao, path_hex);
+    ao = ow__pack_i32(args, ao, size);
+    ao = ow__pack_u32(args, ao, crc32);
+    ao = ow__pack_u8(args, ao, overwrite ? 1 : 0);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_FILE_SYSTEM_BEGIN_FILE_WRITE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (size_out) *size_out = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_read_file_chunk(ow_device* dev, uint32_t session, int32_t offset, int32_t maximum, int32_t* count, char* data, size_t data_cap)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    ao = ow__pack_i32(args, ao, offset);
+    ao = ow__pack_i32(args, ao, maximum);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_FILE_SYSTEM_READ_FILE_CHUNK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (count) *count = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    ow__take_str(ret, &ro, data, (int)data_cap);
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_write_file_chunk(ow_device* dev, uint32_t session, int32_t offset, const char* data, int32_t* position)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    ao = ow__pack_i32(args, ao, offset);
+    ao = ow__pack_str(args, ao, data);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_FILE_SYSTEM_WRITE_FILE_CHUNK, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (position) *position = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_finish_file_transfer(ow_device* dev, uint32_t session, int32_t* size, uint32_t* crc32)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_FILE_SYSTEM_FINISH_FILE_TRANSFER, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (size) *size = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (crc32) *crc32 = ow__take_u32(ret, &ro); else ow__take_u32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_hardware_file_system_cancel_file_transfer(ow_device* dev, uint32_t session)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, session);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_FILE_SYSTEM_CANCEL_FILE_TRANSFER, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_linux_cm0_usb_mode(ow_device* dev, const char* mode, char* mode_out, size_t mode_out_cap, bool* switchable)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, mode);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_LINUX_CM0_USB_MODE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_str(ret, &ro, mode_out, (int)mode_out_cap);
+    if (switchable) *switchable = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     return OW_OK;
 }
 

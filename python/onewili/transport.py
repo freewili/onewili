@@ -208,12 +208,24 @@ class Transport:
                 # lose a partial line this way.
                 self._buf = b""  # a paused caller owns the wire now; drop the rest
                 self._router.abandon()
-                self._paused_ack.set()
+                # Re-assert the ack every spin: a caller that resumes and
+                # pauses again inside one sleep would otherwise see the flag
+                # it just cleared and wait out its whole timeout.
                 while self._pause_requested.is_set() and self._running:
+                    self._paused_ack.set()
                     time.sleep(0.01)
                 continue
             try:
-                chunk = self._serial.read(4096)
+                # read(1) returns as soon as one byte arrives (or the 100 ms
+                # timeout passes with nothing); the rest of what is already
+                # buffered follows without another wait. read(4096) instead
+                # sat out the whole timeout on every command, which put
+                # ~100 ms on each round trip.
+                chunk = self._serial.read(1)
+                if chunk:
+                    waiting = self._serial.in_waiting
+                    if waiting:
+                        chunk += self._serial.read(waiting)
             except Exception:
                 break
             if chunk:

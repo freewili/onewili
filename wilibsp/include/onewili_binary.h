@@ -20,7 +20,14 @@ typedef struct ow_binary_device {
 } ow_binary_device;
 
 ow_status ow_binary_open(ow_binary_device* bdev, const ow_transport* transport);
+/* Optional caller-owned storage: use OW_BIN_CAPTURE_CAPACITY for full captures.
+ * The buffer must remain alive until close. No allocation inside the C API. */
+ow_status ow_binary_open_buffer(ow_binary_device* bdev, const ow_transport* transport,
+                               uint8_t* buffer, uint32_t capacity);
 void      ow_binary_close(ow_binary_device* bdev);
+/* Every frame, including unknown types. Payload remains valid until the next
+ * poll. Raw and decoded polls consume the SAME stream; choose one consumer. */
+int ow_binary_poll_raw(ow_binary_device* bdev, ow_bin_frame* out);
 
 /* Non-blocking pump: zero-timeout read -> WILI parser -> decoder table.
  * Unknown/size-mismatched frames are counted and skipped within the call.

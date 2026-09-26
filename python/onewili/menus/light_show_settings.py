@@ -52,3 +52,18 @@ class LightShowSettings(MenuBase):
             Result: Ok(None) or Err(message).
         """
         return self._call("i", [], [])
+
+    def brightness(self, value: int) -> Result:
+        r"""Brightness.
+
+        Wire: ``h\s\l\b``
+
+        Onboard LED strip brightness divisor, 1 (brightest) to 16 (dimmest)
+
+        Args:
+            value: value ().
+
+        Returns:
+            Result: Ok(None) or Err(message).
+        """
+        return self._call("b", [encoding.enc_int(value)], [])

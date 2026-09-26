@@ -64,6 +64,13 @@ impl<'a> ZoomIo<'a> {
         self.t.call(&cmd)?;
         Ok(())
     }
+
+    /// Probe Exec Window. Stages a known pattern in ZoomIO's SCRATCH_X exec window, runs the full core1 launch sequence, and reads it back. Wire: `s\b\x`
+    pub fn exec_probe(&mut self) -> Result<(), OwError> {
+        let cmd = String::from("s\\b\\x");
+        self.t.call(&cmd)?;
+        Ok(())
+    }
 }
 
 /// Spontaneous event frames this menu emits:

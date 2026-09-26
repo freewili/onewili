@@ -30,4 +30,12 @@ impl<'a> LightShowSettings<'a> {
         self.t.call(&cmd)?;
         Ok(())
     }
+
+    /// Brightness. Onboard LED strip brightness divisor, 1 (brightest) to 16 (dimmest). Wire: `h\s\l\b`
+    pub fn brightness(&mut self, value: i32) -> Result<(), OwError> {
+        let mut cmd = String::from("h\\s\\l\\b");
+        encoding::push_int(&mut cmd, value as i64);
+        self.t.call(&cmd)?;
+        Ok(())
+    }
 }

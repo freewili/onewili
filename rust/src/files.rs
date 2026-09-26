@@ -10,14 +10,16 @@
 //! is each the BODY of a framed response, not a bare line on its own -- the
 //! real put handshake line reads `[h\x\f <hexTimestampNs> <seq> Send File Now
 //! 1]`, not just `Send File Now`. The handshake frame's tag is the full
-//! navigation prefix to that menu (`h\x\f` for put, `h\x\u` for get) -- a
-//! DIFFERENT tag from the later completion frame (`x\f`/`x\u` below), which
-//! comes from a direct `printMenuResponse` call with a fixed literal, not
-//! through `callSubFunction`. So handshake matching below is tag-tolerant
-//! (`framing::parse`, body content only, via the `body` local); completion
-//! matching (`tagged()`) pins to the exact literal tag, since that one really
-//! is fixed by the firmware source. Both handshake lines are emitted with
-//! `printOutAlways`, so quiet mode never suppresses them.
+//! navigation prefix to that menu (`h\x\f` for put, `h\x\u` for get). The
+//! later completion frame (`x\f`/`x\u` below) comes from a direct
+//! `printMenuResponse` call, not through `callSubFunction`; current firmware
+//! builds its tag with `xferFramePath` (navigation prefix + hotkey, so again
+//! `h\x\f`/`h\x\u`), older builds passed the bare literal `x\f`/`x\u`. So
+//! handshake matching below is tag-tolerant (`framing::parse`, body content
+//! only, via the `body` local); completion matching (`tagged()`) accepts the
+//! tag either exactly or as the last backslash-separated component of the
+//! frame's path. Both handshake lines are emitted with `printOutAlways`, so
+//! quiet mode never suppresses them.
 //!
 //! PUT (getFileFromPC / doDownload):
 //!     host   -> "h\nx\nf\n<path> <size> <crc>\n"
@@ -117,23 +119,31 @@ fn build_get_header(dev_path: &str) -> String {
     format!("h\nx\nu\n{} \n", dev_path.replace('/', "\\"))
 }
 
-/// `line` parsed as a framed response/event whose path token is exactly
-/// `tag` (e.g. "x\\f", "x\\u", "*fdir"), or `None` if it isn't one. Reuses
-/// `framing::parse`, which already strips the timestamp/sequence/ok
+/// `line` parsed as a framed response/event whose path token is `tag`
+/// (e.g. "x\\f", "x\\u", "*fdir") -- either exactly, or as the last
+/// backslash-separated component of a longer path ("h\\x\\f" matches
+/// "x\\f"; "hx\\f" and "x\\fz" do not) -- or `None` if it isn't one.
+/// Reuses `framing::parse`, which already strips the timestamp/sequence/ok
 /// wrapper generically -- `frame.response` is already exactly the payload
 /// text the trailer parsers / `parse_fdir_entry` expect.
 ///
 /// Used for COMPLETION frames only (put's "x\\f" trailer, get's "x\\u"
-/// trailer, list's "*fdir" events): those tags are fixed literals the
-/// firmware source hardcodes at the call site, not derived from menu
-/// navigation, so pinning to them exactly is safe. The put/get HANDSHAKE
-/// loops (above `put`/`get`, below) call `framing::parse` directly instead,
-/// without a tag check, because the handshake frame's tag is the full
-/// navigation prefix to that menu ("h\\x\\f"/"h\\x\\u") -- a different,
-/// context-dependent value this function's exact-match would never see.
+/// trailer, list's "*fdir" events). The firmware has spelled the put/get
+/// completion tag two ways: older builds passed the bare literal to
+/// `printMenuResponse` ("x\\f"); current builds print it under the full
+/// navigation prefix via `xferFramePath` ("h\\x\\f", the same tag the
+/// handshake frame carries). Accepting both keeps every fielded firmware
+/// working while still skipping an unrelated framed response rather than
+/// misreading it as this transfer's result. The put/get HANDSHAKE loops
+/// (above `put`/`get`, below) call `framing::parse` directly instead,
+/// without a tag check, matching on body content only.
 fn tagged(line: &str, tag: &str) -> Option<crate::framing::ResponseFrame> {
     let frame = crate::framing::parse(line)?;
-    if frame.path == tag { Some(frame) } else { None }
+    let matches = frame.path == tag
+        || (frame.path.len() > tag.len() + 1
+            && frame.path.ends_with(tag)
+            && frame.path.as_bytes()[frame.path.len() - tag.len() - 1] == b'\\');
+    if matches { Some(frame) } else { None }
 }
 
 enum Fdir {
@@ -342,8 +352,9 @@ impl<'a> Files<'a> {
         }
 
         // The device verifies its own CRC after the payload lands and
-        // reports the result as a framed x\f response: ok on
-        // "success <N> bytes", failure (and file deletion) on
+        // reports the result as a framed x\f response (tagged h\x\f on
+        // current firmware, bare x\f on older builds -- see tagged()): ok
+        // on "success <N> bytes", failure (and file deletion) on
         // "Failed checksum".
         loop {
             let line = io.read_line()?
@@ -400,9 +411,10 @@ impl<'a> Files<'a> {
 
         let payload = io.read_payload(size)?;
 
-        // The crc lives ONLY in this trailer, a framed x\u response with
-        // body "success <N> bytes <CRC> crc". No trailer, or one we can't
-        // parse, means we do not have a crc to trust.
+        // The crc lives ONLY in this trailer, a framed x\u response (tagged
+        // h\x\u on current firmware, bare x\u on older builds) with body
+        // "success <N> bytes <CRC> crc". No trailer, or one we can't parse,
+        // means we do not have a crc to trust.
         loop {
             let line = io.read_line()?.ok_or_else(|| {
                 OwError::Protocol(format!("get {dev_path:?}: timeout waiting for the crc trailer"))
@@ -467,5 +479,29 @@ impl<'a> Files<'a> {
     pub fn get_file(&mut self, dev_path: &str, host_path: &std::path::Path) -> Result<(), OwError> {
         let data = self.get(dev_path)?;
         std::fs::write(host_path, &data).map_err(|e| OwError::Io(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tagged;
+
+    // Both spellings the firmware has used for the completion frame must
+    // match; anything merely containing the tag must not.
+    #[test]
+    fn tagged_accepts_bare_and_navigation_prefixed_tags() {
+        assert!(tagged("[x\\f 0 0 success 11 bytes 1]", "x\\f").is_some());
+        assert!(tagged("[h\\x\\f 0D33E765696EE8C0 317 success 1800 bytes 1]", "x\\f").is_some());
+        assert!(tagged("[h\\x\\u 0D33E766211A1300 324 success 1800 bytes 3246695050 crc 1]", "x\\u").is_some());
+        assert!(tagged("[*fdir 1 2 fil a 1 1]", "*fdir").is_some());
+    }
+
+    #[test]
+    fn tagged_rejects_lookalike_and_sibling_tags() {
+        assert!(tagged("[h\\x\\u 0 0 success 11 bytes 1]", "x\\f").is_none()); // sibling command
+        assert!(tagged("[hx\\f 0 0 success 11 bytes 1]", "x\\f").is_none());     // no separator
+        assert!(tagged("[x\\fz 0 0 success 11 bytes 1]", "x\\f").is_none());     // not at the end
+        assert!(tagged("[f 0 0 success 11 bytes 1]", "x\\f").is_none());          // shorter
+        assert!(tagged("[*fdir 1 2 fil a 1 1]", "x\\f").is_none());
     }
 }

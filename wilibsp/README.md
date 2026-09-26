@@ -32,9 +32,27 @@ ow_event ev;
 while (ow_binary_poll(&bdev, &ev) == 1) { /* ... */ }
 ```
 
-Poll events regularly: each stream buffers 1024 bytes and whole frames are
-dropped (counted by `ow_fwgui_dropped_frames()`) when a buffer is full.
-Logic-analyzer binary reports are never mirrored over the display link.
+Receive is interrupt driven (UART0_IRQ): bytes land in a 32 KB ring whatever
+the app is doing, so MAIN is never held on CTS by a slow display loop. Poll
+events regularly all the same: the text stream buffers 8 KB, the binary stream
+32 KB (~340 CAN reports), and whole frames are dropped (counted by
+`ow_fwgui_dropped_frames()`; high-water marks and overruns in
+`ow_fwgui_get_stats()`) when a buffer is full. Logic-analyzer binary reports
+are never mirrored over the display link; CAN `canRxReport` frames are.
+
+## Fast CAN transmit
+
+Every generated call is synchronous (one round trip per frame), which over
+this link is ~1400 `write_canfd` per second at 8 bytes and ~770/s at 64
+bytes -- 3.5x the USB console. `onewili_fast.h` keeps several `write_canfd`
+commands in flight and hands back each result by token
+(`ow_fast_canfd_write`, `ow_fast_tx_reap`); depth 4 measured ~1580/s at 8 B,
+but MAIN refuses (rather than queues) frames when its 16-deep one-shot FIFO is
+full, so refused frames must be resent and arrive out of order. The periodic
+slots (`write_canfd_periodic`, firmware timed) reach ~2900/s at 64 B and
+~4100/s at 8 B. The raw hooks it builds on (`ow_raw_send`,
+`ow_raw_next_response`) are in `onewili.h`; `ow_poll_text_line` keeps any
+response frame it completes for them instead of discarding it.
 
 ## SD card
 

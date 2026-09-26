@@ -125,4 +125,61 @@ impl<'a> FileSystem<'a> {
         let _r = crate::transport::call(304 /* CMD_HARDWARE_FILE_SYSTEM_SET_SD_CARD_HOST */, &a)?;
         Ok(())
     }
+
+    /// Begin File Read. Open an SD file for bounded framed reads. Paths are UTF-8 encoded as compact hex and must be absolute; the session expires after 30 seconds of inactivity.. Wire: `h\x\0`
+    pub fn begin_file_read(&mut self, session: u32, path_hex: &str) -> Result<i32, OwError> {
+        let mut a = crate::transport::Args::new();
+        a.u32(session);
+        a.str(path_hex);
+        let mut _r = crate::transport::call(607 /* CMD_HARDWARE_FILE_SYSTEM_BEGIN_FILE_READ */, &a)?;
+        Ok(_r.i32())
+    }
+
+    /// Begin File Write. Stage an upload beside its destination. Existing files are preserved until size and CRC32 validation succeeds. No raw USB mode is entered.. Wire: `h\x\1`
+    pub fn begin_file_write(&mut self, session: u32, path_hex: &str, size: i32, crc32: u32, overwrite: bool) -> Result<i32, OwError> {
+        let mut a = crate::transport::Args::new();
+        a.u32(session);
+        a.str(path_hex);
+        a.i32(size);
+        a.u32(crc32);
+        a.u8(if overwrite { 1 } else { 0 });
+        let mut _r = crate::transport::call(608 /* CMD_HARDWARE_FILE_SYSTEM_BEGIN_FILE_WRITE */, &a)?;
+        Ok(_r.i32())
+    }
+
+    /// Read File Chunk. Read the next 1 to 192 bytes as compact hex. Use the exact sequential offset; a dash means an empty file or EOF.. Wire: `h\x\2`
+    pub fn read_file_chunk(&mut self, session: u32, offset: i32, maximum: i32) -> Result<(i32, String), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.u32(session);
+        a.i32(offset);
+        a.i32(maximum);
+        let mut _r = crate::transport::call(609 /* CMD_HARDWARE_FILE_SYSTEM_READ_FILE_CHUNK */, &a)?;
+        Ok((_r.i32(), _r.string()))
+    }
+
+    /// Write File Chunk. Write the next 1 to 192 hex-encoded bytes. Duplicate or out-of-order chunks are rejected; never replay an ambiguous timeout.. Wire: `h\x\3`
+    pub fn write_file_chunk(&mut self, session: u32, offset: i32, data: &str) -> Result<i32, OwError> {
+        let mut a = crate::transport::Args::new();
+        a.u32(session);
+        a.i32(offset);
+        a.str(data);
+        let mut _r = crate::transport::call(610 /* CMD_HARDWARE_FILE_SYSTEM_WRITE_FILE_CHUNK */, &a)?;
+        Ok(_r.i32())
+    }
+
+    /// Finish File Transfer. Verify the byte count, close the file and return CRC32. A complete verified upload is published; an incomplete or corrupt upload never replaces the destination.. Wire: `h\x\4`
+    pub fn finish_file_transfer(&mut self, session: u32) -> Result<(i32, u32), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.u32(session);
+        let mut _r = crate::transport::call(611 /* CMD_HARDWARE_FILE_SYSTEM_FINISH_FILE_TRANSFER */, &a)?;
+        Ok((_r.i32(), _r.u32()))
+    }
+
+    /// Cancel File Transfer. Close the matching transfer and remove its incomplete staging file. Other shell and menu sessions remain available.. Wire: `h\x\5`
+    pub fn cancel_file_transfer(&mut self, session: u32) -> Result<(), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.u32(session);
+        let _r = crate::transport::call(612 /* CMD_HARDWARE_FILE_SYSTEM_CANCEL_FILE_TRANSFER */, &a)?;
+        Ok(())
+    }
 }

@@ -85,4 +85,21 @@ impl<'a> Canfd<'a> {
         let _r = crate::transport::call(63 /* CMD_IO_CANFD_SET_CAN_REGISTER */, &a)?;
         Ok(())
     }
+
+    /// Enable CAN(FD) Receive Queue. Enables or disables the on-device receive queue that receive_canfd (v) reads from.. Wire: `i\c\e`
+    pub fn enable_canfd_receive_queue(&mut self, channel: i32, enabled: i32) -> Result<(), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.i32(channel);
+        a.i32(enabled);
+        let _r = crate::transport::call(599 /* CMD_IO_CANFD_ENABLE_CANFD_RECEIVE_QUEUE */, &a)?;
+        Ok(())
+    }
+
+    /// Receive CAN(FD). Pops the oldest received CAN(FD) frame from the on-device receive queue (frame=0 when empty).. Wire: `i\c\v`
+    pub fn receive_canfd(&mut self, channel: i32) -> Result<(bool, i32, i32, u32, i32, i32, i32, i32, Vec<u8>), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.i32(channel);
+        let mut _r = crate::transport::call(600 /* CMD_IO_CANFD_RECEIVE_CANFD */, &a)?;
+        Ok((_r.u8() != 0, _r.i32(), _r.i32(), _r.u32(), _r.i32(), _r.i32(), _r.i32(), _r.i32(), _r.bytes()))
+    }
 }

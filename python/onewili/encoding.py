@@ -47,13 +47,19 @@ def decode_returns(spec: "list[str]", response: str):
     tokens = response.split()
     out = []
     i = 0
-    for kind in spec:
+    for field, kind in enumerate(spec):
         if kind == "bytes":
             out.append(bytes(int(t, 16) for t in tokens[i:]))
             i = len(tokens)
         elif kind == "str":
-            out.append(" ".join(tokens[i:]))
-            i = len(tokens)
+            # Only a final string is a free-form tail. Intermediate strings
+            # are single tokens (e.g. Device State: sd, bool, mask, clock).
+            if field == len(spec) - 1:
+                out.append(" ".join(tokens[i:]))
+                i = len(tokens)
+            else:
+                out.append(tokens[i])
+                i += 1
         else:
             tok = tokens[i]
             i += 1

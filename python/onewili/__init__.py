@@ -16,7 +16,8 @@ def find_devices():
     return pyfwfinder.find_all()
 
 
-def connect(serial: "str | None" = None, binary: bool = False) -> OneWili:
+def connect(serial: "str | None" = None, binary: bool = False, *, raw: bool = False,
+            queue_size: int = 256) -> OneWili:
     """Find a FreeWili with pyfwfinder and open its Main-processor serial port.
 
     binary=True also opens the FTDI binary-event port (dev.binary_events).
@@ -31,11 +32,16 @@ def connect(serial: "str | None" = None, binary: bool = False) -> OneWili:
     if len(devices) > 1:
         raise RuntimeError(f"{len(devices)} FreeWili devices found; pass serial=...")
     device = devices[0]
-    binary_port = _binary_port(device) if binary else None
+    try:
+        binary_port = _binary_port(device)
+    except RuntimeError:
+        if binary:
+            raise
+        binary_port = None
     dev = OneWili(_main_port(device), binary_port=binary_port).open()
     if binary:
         try:
-            dev.open_binary()
+            dev.open_binary(raw=raw, queue_size=queue_size)
         except Exception:
             dev.close()   # don't leak the open text port when the FTDI open fails
             raise
@@ -43,7 +49,10 @@ def connect(serial: "str | None" = None, binary: bool = False) -> OneWili:
 
 
 def _main_port(device) -> str:
-    ports = [u for u in device.usb_devices if "serial" in str(getattr(u, "kind", "")).lower()]
+    ports = [u for u in device.usb_devices
+             if "ftdi" not in str(getattr(u, "kind", "")).lower()
+             and ("serial" in str(getattr(u, "kind", "")).lower()
+                  or "fw2 v" in str(getattr(u, "name", "")).lower())]
     if not ports:
         raise RuntimeError(f"{getattr(device, 'name', device)!r}: no serial USB device found")
     main = [p for p in ports if "main" in str(getattr(p, "name", "")).lower()]

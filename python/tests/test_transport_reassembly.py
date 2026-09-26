@@ -48,6 +48,11 @@ class FakeSerial:
     def close(self) -> None:
         pass
 
+    @property
+    def in_waiting(self) -> int:
+        with self._lock:
+            return len(self.out)
+
     def queue(self, data: bytes) -> None:
         with self._lock:
             self.out += data

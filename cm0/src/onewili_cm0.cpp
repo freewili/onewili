@@ -1,7 +1,10 @@
 #include "onewili_cm0.h"
 #include <chrono>
+#include <stdexcept>
 namespace fwcm0 {
 OneWiliLink::OneWiliLink(ConsoleClient& client) : client_(client) {
+  if (!client_.connect(1000, true))
+    throw std::runtime_error("MAIN did not complete OneWili mailbox handshake");
   auto rx = rx_;  // capture a shared_ptr copy, NOT `this`
   client_.on_console([rx](const std::vector<uint8_t>& body) {
     std::lock_guard<std::mutex> l(rx->m);
@@ -9,7 +12,10 @@ OneWiliLink::OneWiliLink(ConsoleClient& client) : client_(client) {
     rx->cv.notify_all();
   });
 }
-OneWiliLink::~OneWiliLink() { client_.on_console(nullptr); }
+OneWiliLink::~OneWiliLink() {
+  client_.on_console(nullptr);
+  try { client_.set_stream(false); } catch (...) { }
+}
 ow_transport OneWiliLink::transport() {
   ow_transport t; t.ctx = this; t.write = &OneWiliLink::c_write; t.read = &OneWiliLink::c_read; return t;
 }

@@ -83,6 +83,33 @@ impl<'a> Canfd<'a> {
         self.t.call(&cmd)?;
         Ok(())
     }
+
+    /// Enable CAN(FD) Receive Queue. Enables or disables the on-device receive queue that receive_canfd (v) reads from.. Wire: `i\c\e`
+    pub fn enable_canfd_receive_queue(&mut self, channel: i32, enabled: i32) -> Result<(), OwError> {
+        let mut cmd = String::from("i\\c\\e");
+        encoding::push_int(&mut cmd, channel as i64);
+        encoding::push_int(&mut cmd, enabled as i64);
+        self.t.call(&cmd)?;
+        Ok(())
+    }
+
+    /// Receive CAN(FD). Pops the oldest received CAN(FD) frame from the on-device receive queue (frame=0 when empty).. Wire: `i\c\v`
+    pub fn receive_canfd(&mut self, channel: i32) -> Result<(bool, i32, i32, u32, i32, i32, i32, i32, Vec<u8>), OwError> {
+        let mut cmd = String::from("i\\c\\v");
+        encoding::push_int(&mut cmd, channel as i64);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let frame = encoding::tok_bool(&mut toks)?;
+        let queued = encoding::tok_int(&mut toks)? as i32;
+        let dropped = encoding::tok_int(&mut toks)? as i32;
+        let arb_id = encoding::tok_hex(&mut toks)? as u32;
+        let xtd_id = encoding::tok_int(&mut toks)? as i32;
+        let can_fd = encoding::tok_int(&mut toks)? as i32;
+        let timestamp_us = encoding::tok_int(&mut toks)? as i32;
+        let dlc = encoding::tok_int(&mut toks)? as i32;
+        let data = encoding::rest_bytes(&mut toks)?;
+        Ok((frame, queued, dropped, arb_id, xtd_id, can_fd, timestamp_us, dlc, data))
+    }
 }
 
 /// Spontaneous event frames this menu emits:

@@ -54,6 +54,8 @@ typedef struct ow_evt_logic_analyzer_report {
     uint32_t analog_buffer_head;   /* uiAnalogBufferHead @ 36 */
     uint32_t analog_trigger_location;   /* uiAnalogTriggerLocation @ 40 */
     bool error;   /* frame header error bit */
+    const uint8_t* sample_data; /* digital then analog; valid until next poll */
+    uint32_t sample_bytes; /* whole little-endian words, ring order */
 } ow_evt_logic_analyzer_report;
 
 typedef enum ow_event_kind {

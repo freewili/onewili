@@ -700,6 +700,34 @@
         }
       ]
     },
+    "BinaryEventQueue": {
+      "attributes": {},
+      "doc": "Bounded queue of decoded events, or RawFrame in raw mode.",
+      "methods": [
+        {
+          "doc": "Read an event; raises queue.Empty on timeout.",
+          "name": "get",
+          "returns": "",
+          "signature": "get(block=True, timeout=None)"
+        },
+        {
+          "doc": "Read an event without waiting; raises queue.Empty if empty.",
+          "name": "get_nowait",
+          "returns": "",
+          "signature": "get_nowait()"
+        }
+      ]
+    },
+    "BinaryStream": {
+      "attributes": {
+        "dropped_events": "int",
+        "last_error": "Exception",
+        "size_mismatches": "int",
+        "unknown_frames": "int"
+      },
+      "doc": "Binary reader status and overflow diagnostics.",
+      "methods": []
+    },
     "BluetoothLE": {
       "attributes": {
         "ble_settings": "BLESettings"
@@ -1013,6 +1041,100 @@
           "returns": "Result",
           "signature": "set_can_register(channel: int, start_address: int, byte_count: int, word_to_write: int) -> Result",
           "wire": "i\\c\\s"
+        },
+        {
+          "doc": "Enable CAN(FD) Receive Queue\n\nEnables or disables the on-device receive queue that receive_canfd (v) reads from.\n\n## Enable CAN(FD) Receive Queue\n\nArms or disarms the on-device receive queue for the selected channel. While armed, every frame the controller receives is copied into a small ring on the MAIN CPU, where `Receive CAN(FD)` (`v`) pops it one frame per call. This is the receive path for scripts running **on the device** (rthon, WASM): they drive commands through the local menu executor and only ever see a command's own response, never the spontaneous `[*can0 ...]` event lines that `Stream CAN(FD)` (`o`) sends to a host.\n\n### Arguments\n\n- `channel` — CAN controller index\n  - `0` — CAN channel 0 (`obCANFD1`)\n  - `1` — CAN channel 1 (`obCANFD2`)\n  - Note: FreeWili2 only has one CAN channel; channel `1` is reserved for future Orcas.\n- `enabled` — queue state\n  - `0` — disable the queue (frees its storage and clears the queued and dropped counts)\n  - `1` — enable the queue\n\n### Returns\n\n- `success` — `1` if the queue is now in the requested state, `0` otherwise. `Invalid` means an argument did not parse; `Failed` means enabling could not get storage (PSRAM unavailable).\n\n### Example\n\n```\ne 0 1   # arm the receive queue on channel 0 before traffic starts\ne 0 0   # disarm it and release its storage\n```\n\n### Notes\n\n- Depth is 32 frames per channel. When the queue is full the **oldest** frame is dropped to make room and a per-channel `dropped` counter is incremented; `Receive CAN(FD)` reports that counter with every response so a slow poller can tell how much it missed.\n- Storage is allocated in PSRAM when the queue is enabled and released when it is disabled, so an idle queue costs no memory.\n- The queue is independent of the host stream (`o`): both can be on at once and neither steals frames from the other.\n- Enabling is idempotent: enabling an already-armed queue keeps its contents and counters.\n- `Receive CAN(FD)` (`v`) auto-enables the queue on its first use, so calling `e` is only needed to disable it or to pre-arm it before traffic starts (frames received before the queue is armed are not queued).\n- Requires power zone 15 (the CAN transceiver zone).\n\nEnter Channel and enable state",
+          "is_setting": false,
+          "name": "enable_canfd_receive_queue",
+          "params": [
+            {
+              "name": "channel",
+              "type": "int"
+            },
+            {
+              "name": "enabled",
+              "type": "int"
+            }
+          ],
+          "required_zones": [
+            15
+          ],
+          "returns": "Result",
+          "signature": "enable_canfd_receive_queue(channel: int, enabled: int) -> Result",
+          "wire": "i\\c\\e"
+        },
+        {
+          "doc": "Receive CAN(FD)\n\nPops the oldest received CAN(FD) frame from the on-device receive queue (frame=0 when empty).\n\n## Receive CAN(FD)\n\nPops the oldest frame from the selected channel's on-device receive queue and returns it. Intended for scripts running on the device (rthon, WASM) that cannot see the `[*can0 ...]` stream events; a host can use it too. Call it repeatedly until `frame` is `0` to drain the queue.\n\n### Arguments\n\n- `channel` — CAN controller index\n  - `0` — CAN channel 0 (`obCANFD1`)\n  - `1` — CAN channel 1 (`obCANFD2`)\n  - Note: FreeWili2 only has one CAN channel; channel `1` is reserved for future Orcas.\n\n### Returns\n\nFields are returned in this order, space-separated:\n\n- `frame` — `1` if a frame was returned, `0` if the queue was empty. When `0`, every other field is `0` except `dropped`, and `data` is empty.\n- `queued` — frames still waiting in the queue **after** this pop.\n- `dropped` — running count of frames discarded (oldest first) because the queue was full, since it was enabled.\n- `arbId` — arbitration ID in hex, no `0x` prefix.\n- `xtdId` — `1` for an extended 29-bit ID, `0` for a standard 11-bit ID.\n- `canFd` — `1` for a CAN FD frame, `0` for classic CAN 2.0.\n- `timestampUs` — device uptime in microseconds when the frame was drained from the controller, as a 32-bit value (wraps every ~71 minutes).\n- `dlc` — payload length in bytes (`0`–`64`).\n- `data` — the payload bytes in hex (`dlc` of them), space-separated.\n\n### Wire layout\n\n```\nv 0\n1 3 0 123 0 0 4821000 4 DE AD BE EF   # a frame: 3 more queued, none dropped, ID 0x123, classic, 4 bytes\n0 0 0 0 0 0 0 0                        # empty queue (dropped may be non-zero, e.g. 0 0 17 0 0 0 0 0)\n```\n\n### Notes\n\n- The queue is enabled automatically on the first call, so no `Enable CAN(FD) Receive Queue` (`e`) call is needed unless you want to pre-arm it before traffic starts or to turn it off again.\n- The command services the controller's receive FIFO itself before popping, so it keeps working from a caller that blocks the main loop (a running rthon or WASM script). It honours the same per-channel Neptune mode gate as the main loop. Frames drained by that in-command service are not echoed as `[*can0 ...]` text events (the echo would land in the command's own response); they still reach the binary stream and the panel table. In the normal cooperative case the main loop has already drained them, echo included, and this service finds nothing new.\n- Depth is 32 frames; when full the oldest frame is dropped and `dropped` counts it. Poll faster, or use a hardware filter (`f`), if `dropped` keeps growing.\n- Independent of the host stream (`o`); both may be on at once.\n- `Failed` is returned if the queue could not be enabled (PSRAM unavailable); `Invalid` if `channel` did not parse.\n- Requires power zone 15 (the CAN transceiver zone).\n\n### From a script on the device\n\nrthon returns the fields as one list, the data bytes expanded one element each: `[frame, queued, dropped, arbId, xtdId, canFd, timestampUs, dlc, b0, b1, ...]`:\n\n```\nf = dev.io.canfd.receive_canfd(0)\nif f[0] == 1:\n    for i in range(f[7]):\n        b = f[8 + i]\n```\n\nWASM decodes the fields into typed outputs, the byte array last:\n\n```\now_io_canfd_receive_canfd(dev, 0, &frame, &queued, &dropped, &arb_id, &xtd_id, &can_fd,\n                          &timestamp_us, &dlc, data, sizeof data, &data_len);\n```\n\nEnter Channel",
+          "is_setting": false,
+          "name": "receive_canfd",
+          "params": [
+            {
+              "name": "channel",
+              "type": "int"
+            }
+          ],
+          "required_zones": [
+            15
+          ],
+          "returns": "Result",
+          "signature": "receive_canfd(channel: int) -> Result",
+          "wire": "i\\c\\v"
+        }
+      ]
+    },
+    "CdcPerf": {
+      "attributes": {},
+      "doc": "CDC Serial Performance",
+      "methods": [
+        {
+          "doc": "Blast\n\nStreams Bytes of deterministic XORshift32 pattern data device-to-host as fast as possible in Chunk-sized writes. Prints the line <<<BLAST>>> before the raw binary begins. Returns bytes,elapsed_us,crc32 (CRC-32 of the payload)\n\nDecimal: Total Bytes (1..134217728), Chunk Size (64..2048) Separated by Spaces",
+          "is_setting": false,
+          "name": "cdc_perf_blast",
+          "params": [
+            {
+              "name": "bytes",
+              "type": "int"
+            },
+            {
+              "name": "chunk",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "cdc_perf_blast(bytes: int, chunk: int) -> Result",
+          "wire": "i\\y\\b"
+        },
+        {
+          "doc": "Sink\n\nReceives exactly Bytes of raw binary host-to-device and CRC-32-accumulates them. Prints the line <<<SINK>>> when ready to receive. A 10 second inactivity timeout aborts with failure. Returns bytes,elapsed_us,crc32\n\nDecimal: Total Bytes to receive (1..134217728)",
+          "is_setting": false,
+          "name": "cdc_perf_sink",
+          "params": [
+            {
+              "name": "bytes",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "cdc_perf_sink(bytes: int) -> Result",
+          "wire": "i\\y\\s"
+        },
+        {
+          "doc": "Echo\n\nPer round reads exactly Chunk raw bytes from the host then writes them back verbatim, Rounds times. Prints the line <<<ECHO>>> when ready for round 1. A 10 second inactivity timeout aborts with failure. Returns rounds,elapsed_us\n\nDecimal: Rounds (1..100000), Chunk Size (1..512) Separated by Spaces",
+          "is_setting": false,
+          "name": "cdc_perf_echo",
+          "params": [
+            {
+              "name": "rounds",
+              "type": "int"
+            },
+            {
+              "name": "chunk",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "cdc_perf_echo(rounds: int, chunk: int) -> Result",
+          "wire": "i\\y\\e"
         }
       ]
     },
@@ -1436,6 +1558,209 @@
         }
       ]
     },
+    "EthTest": {
+      "attributes": {},
+      "doc": "Ethernet Test",
+      "methods": [
+        {
+          "doc": "Start Periodic\n\nStarts the test-frame generator sending one frame every Period us (see setting u). Frames use the current Frame Size/Type/CRC settings and the destination MAC from command m. Refused while Loopback is on or on a build without the NCM stack",
+          "is_setting": false,
+          "name": "eth_test_start_periodic",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_periodic() -> Result",
+          "wire": "i\\r\\t\\p"
+        },
+        {
+          "doc": "Start Flood\n\nStarts the test-frame generator sending as fast as the USB link accepts (natural NTB backpressure paces it; submit failures are counted, not lost sequence numbers). Refused while Loopback is on",
+          "is_setting": false,
+          "name": "eth_test_start_flood",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_flood() -> Result",
+          "wire": "i\\r\\t\\f"
+        },
+        {
+          "doc": "Start Line Rate\n\nStarts the test-frame generator at Line Rate % (setting e) of a 10 Mbit/s reference wire, using a token bucket that charges each frame its size plus 24 bytes of preamble/FCS/gap overhead. Refused while Loopback is on",
+          "is_setting": false,
+          "name": "eth_test_start_line_rate",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_line_rate() -> Result",
+          "wire": "i\\r\\t\\r"
+        },
+        {
+          "doc": "Start Burst\n\nStarts the test-frame generator releasing Burst Count frames (setting n) every second, the first burst immediately. Refused while Loopback is on",
+          "is_setting": false,
+          "name": "eth_test_start_burst",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_start_burst() -> Result",
+          "wire": "i\\r\\t\\b"
+        },
+        {
+          "doc": "Send N Frames\n\nSends exactly Count test frames as fast as the link accepts, then stops by itself (Count 1 = one transmit). Counters keep running so the result can be read with Show Stats afterwards. Refused while Loopback is on\n\nDecimal: Frame Count (1..1000000)",
+          "is_setting": false,
+          "name": "eth_test_send_count",
+          "params": [
+            {
+              "name": "count",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "eth_test_send_count(count: int) -> Result",
+          "wire": "i\\r\\t\\o"
+        },
+        {
+          "doc": "Stop\n\nStops the test-frame generator. Counters are kept (use Clear Stats to zero them); the responder and loopback settings are unaffected",
+          "is_setting": false,
+          "name": "eth_test_stop",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_stop() -> Result",
+          "wire": "i\\r\\t\\x"
+        },
+        {
+          "doc": "Show Stats\n\nPrints one line of key=value counters: mode link TXf TXb TXfail TXfps TXkbps RXf RXb RXfps RXkbps gap lost crc under over other echoq echos echod. The fps/kbps values are 1 Hz rates; RXf counts received FWET test frames, other counts everything else (host OS chatter)",
+          "is_setting": false,
+          "name": "eth_test_show_stats",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_show_stats() -> Result",
+          "wire": "i\\r\\t\\s"
+        },
+        {
+          "doc": "Clear Stats\n\nZeros every TX/RX/echo counter and restarts sequence-gap tracking. The generator, responder and link state are unaffected",
+          "is_setting": false,
+          "name": "eth_test_clear_stats",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_clear_stats() -> Result",
+          "wire": "i\\r\\t\\c"
+        },
+        {
+          "doc": "Set Dest MAC\n\nSets the destination MAC for generated test frames (default FF FF FF FF FF FF broadcast). Takes effect at the next generator start. Not persisted across reboot\n\nHex: 6 Destination MAC Bytes Separated by Spaces",
+          "is_setting": false,
+          "name": "eth_test_set_dest_mac",
+          "params": [
+            {
+              "name": "dest_mac",
+              "type": "bytes | bytearray"
+            }
+          ],
+          "returns": "Result",
+          "signature": "eth_test_set_dest_mac(dest_mac: bytes | bytearray) -> Result",
+          "wire": "i\\r\\t\\m"
+        },
+        {
+          "doc": "Link Status\n\nReports whether the USB network adapter is up (host selected the NCM data interface) plus the host-side MAC, device-side MAC and the device's static IP 10.55.0.2",
+          "is_setting": false,
+          "name": "eth_test_link_status",
+          "params": [],
+          "returns": "Result",
+          "signature": "eth_test_link_status() -> Result",
+          "wire": "i\\r\\t\\k"
+        },
+        {
+          "doc": "Frame Size\n\nTotal Ethernet frame size in bytes for generated test frames (headers included, FCS excluded). The udp frame type needs at least 66 bytes for its headers and is raised to that silently",
+          "is_setting": true,
+          "name": "frame_size",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "frame_size(value: int) -> Result",
+          "wire": "i\\r\\t\\i"
+        },
+        {
+          "doc": "Period us\n\nMicroseconds between frames in Periodic mode (10000 = 100 frames per second)",
+          "is_setting": true,
+          "name": "period_us",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "period_us(value: int) -> Result",
+          "wire": "i\\r\\t\\u"
+        },
+        {
+          "doc": "Burst Count\n\nFrames released in each one-second burst in Burst mode",
+          "is_setting": true,
+          "name": "burst_count",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "burst_count(value: int) -> Result",
+          "wire": "i\\r\\t\\n"
+        },
+        {
+          "doc": "Line Rate Percent\n\nPercentage of the 10 Mbit/s reference wire rate for Line Rate mode",
+          "is_setting": true,
+          "name": "line_rate_percent",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "line_rate_percent(value: int) -> Result",
+          "wire": "i\\r\\t\\e"
+        },
+        {
+          "doc": "Payload CRC\n\nWhen on, each generated frame carries a CRC32 over its sequence/timestamp/fill so the host can prove payload integrity; costs a CRC pass per frame at high rates",
+          "is_setting": true,
+          "name": "payload_crc",
+          "params": [],
+          "returns": "Result",
+          "signature": "payload_crc() -> Result",
+          "wire": "i\\r\\t\\v"
+        },
+        {
+          "doc": "Responder\n\nWhen on, the device answers as 10.55.0.2: ARP requests, ICMP echo (ping) and UDP echo on port 5556. Turn off to measure pure generator/counter behavior. (Served by lwIP when compiled in -- FW2MAIN_LWIP builds answer through the Network (TCP/IP) menu's stack and this toggle only drives the legacy mini-responder on non-lwIP builds)",
+          "is_setting": true,
+          "name": "responder",
+          "params": [],
+          "returns": "Result",
+          "signature": "responder() -> Result",
+          "wire": "i\\r\\t\\a"
+        },
+        {
+          "doc": "Loopback\n\nWhen on, EVERY received frame is echoed back with its MAC addresses swapped and the generator/responder are disabled (mutually exclusive). Always off after a reboot",
+          "is_setting": true,
+          "name": "loopback",
+          "params": [],
+          "returns": "Result",
+          "signature": "loopback() -> Result",
+          "wire": "i\\r\\t\\l"
+        },
+        {
+          "doc": "Frame Type\n\nCarrier for generated test frames: raw = ethertype 0x88B5 (needs npcap/scapy on the host), udp = IPv4 broadcast 10.55.0.255 port 5555 (a plain host socket receives it)",
+          "is_setting": true,
+          "name": "frame_type",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "frame_type(value: int) -> Result",
+          "wire": "i\\r\\t\\t"
+        }
+      ]
+    },
     "FPGAClockSettings": {
       "attributes": {},
       "doc": "FPGA Clock",
@@ -1704,6 +2029,126 @@
           "returns": "Result",
           "signature": "set_sd_card_host(host: int) -> Result",
           "wire": "h\\x\\k"
+        },
+        {
+          "doc": "Begin File Read\n\nOpen an SD file for bounded framed reads. Paths are UTF-8 encoded as compact hex and must be absolute; the session expires after 30 seconds of inactivity.\n\nsession=hex32,path_hex=string",
+          "is_setting": false,
+          "name": "begin_file_read",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            },
+            {
+              "name": "path_hex",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "begin_file_read(session: int, path_hex: str) -> Result",
+          "wire": "h\\x\\0"
+        },
+        {
+          "doc": "Begin File Write\n\nStage an upload beside its destination. Existing files are preserved until size and CRC32 validation succeeds. No raw USB mode is entered.\n\nsession=hex32,path_hex=string,size=decU32,crc32=hex32,overwrite=bool",
+          "is_setting": false,
+          "name": "begin_file_write",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            },
+            {
+              "name": "path_hex",
+              "type": "str"
+            },
+            {
+              "name": "size",
+              "type": "int"
+            },
+            {
+              "name": "crc32",
+              "type": "int"
+            },
+            {
+              "name": "overwrite",
+              "type": "bool"
+            }
+          ],
+          "returns": "Result",
+          "signature": "begin_file_write(session: int, path_hex: str, size: int, crc32: int, overwrite: bool) -> Result",
+          "wire": "h\\x\\1"
+        },
+        {
+          "doc": "Read File Chunk\n\nRead the next 1 to 192 bytes as compact hex. Use the exact sequential offset; a dash means an empty file or EOF.\n\nsession=hex32,offset=decU32,maximum=decU32",
+          "is_setting": false,
+          "name": "read_file_chunk",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            },
+            {
+              "name": "offset",
+              "type": "int"
+            },
+            {
+              "name": "maximum",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "read_file_chunk(session: int, offset: int, maximum: int) -> Result",
+          "wire": "h\\x\\2"
+        },
+        {
+          "doc": "Write File Chunk\n\nWrite the next 1 to 192 hex-encoded bytes. Duplicate or out-of-order chunks are rejected; never replay an ambiguous timeout.\n\nsession=hex32,offset=decU32,data=string",
+          "is_setting": false,
+          "name": "write_file_chunk",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            },
+            {
+              "name": "offset",
+              "type": "int"
+            },
+            {
+              "name": "data",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "write_file_chunk(session: int, offset: int, data: str) -> Result",
+          "wire": "h\\x\\3"
+        },
+        {
+          "doc": "Finish File Transfer\n\nVerify the byte count, close the file and return CRC32. A complete verified upload is published; an incomplete or corrupt upload never replaces the destination.\n\nsession=hex32",
+          "is_setting": false,
+          "name": "finish_file_transfer",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "finish_file_transfer(session: int) -> Result",
+          "wire": "h\\x\\4"
+        },
+        {
+          "doc": "Cancel File Transfer\n\nClose the matching transfer and remove its incomplete staging file. Other shell and menu sessions remain available.\n\nsession=hex32",
+          "is_setting": false,
+          "name": "cancel_file_transfer",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "cancel_file_transfer(session: int) -> Result",
+          "wire": "h\\x\\5"
         }
       ]
     },
@@ -3135,6 +3580,33 @@
           "returns": "Result",
           "signature": "show_panel(index: int) -> Result",
           "wire": "g\\c\\c"
+        },
+        {
+          "doc": "Set Menu Text\n\nSets a custom panel menu button label (up to 15 bytes).\n\nCreate the custom panel with ShowMenu enabled first. Button order is gray=0, yellow=1, green=2, blue=3, red=4. Labels do not assign actions; poll Read Buttons to handle presses.\n\nEnter button (0 gray, 1 yellow, 2 green, 3 blue, 4 red), label",
+          "is_setting": false,
+          "name": "set_menu_text",
+          "params": [
+            {
+              "name": "button",
+              "type": "int"
+            },
+            {
+              "name": "text",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "set_menu_text(button: int, text: str) -> Result",
+          "wire": "g\\c\\f"
+        },
+        {
+          "doc": "Read Buttons\n\nReturns and clears the panel and keypad button press bitmask.\n\nBits 0 through 4 represent gray, yellow, green, blue, and red. Keypad bits are Up=5, Down=6, Left=7, Right=8, Center=9, OK=10, X/Cancel=11, Home=12, Page=13. These are bit positions, not GUI event IDs (keypad event IDs 33 through 41 map to bits 5 through 13). Presses are latched until read, so short taps between polls are retained. Repeated presses of one button coalesce. Release and long-press events are ignored. Creating a custom panel clears the latch. This latch is shared by all API clients; use one polling consumer. Existing GUI event handling continues normally.",
+          "is_setting": false,
+          "name": "read_buttons",
+          "params": [],
+          "returns": "Result",
+          "signature": "read_buttons() -> Result",
+          "wire": "g\\c\\e"
         }
       ]
     },
@@ -3386,15 +3858,18 @@
         "analog_out": "AnalogOut",
         "audio": "Audio",
         "canfd": "CANFD",
+        "cdc_perf": "CdcPerf",
         "gpio": "GPIO",
         "i2c": "I2C",
         "logic_analyzer": "LogicAnalyzer",
         "logic_player": "LogicPlayer",
         "mdio": "MDIO",
+        "net": "Net",
         "nice_usb": "NiceUsb",
         "sensors": "Sensors",
         "serial_leds": "SerialLEDs",
         "spi": "SPI",
+        "t1s": "T1S",
         "uart": "UART",
         "wil_eye": "WILEye"
       },
@@ -3715,6 +4190,20 @@
           "returns": "Result",
           "signature": "roku_led_control() -> Result",
           "wire": "h\\s\\l\\i"
+        },
+        {
+          "doc": "Brightness\n\nOnboard LED strip brightness divisor, 1 (brightest) to 16 (dimmest)",
+          "is_setting": true,
+          "name": "brightness",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "brightness(value: int) -> Result",
+          "wire": "h\\s\\l\\b"
         }
       ]
     },
@@ -3743,6 +4232,100 @@
           "returns": "Result",
           "signature": "open_shell() -> Result",
           "wire": "l\\b"
+        },
+        {
+          "doc": "Open Shell Session\n\nOpen a framed Linux shell without entering menu passthrough\n\nChoose a nonzero session token and reuse it for read, write and close. An active panel or legacy shell refuses this request. Read or write at least every 30 seconds to retain ownership. Uses the FPGA mailbox, including when CM0 USB is in host mode. Requires the fwcm0 bridge daemon.\n\nSession token (nonzero hex32)",
+          "is_setting": false,
+          "name": "open_shell_session",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            }
+          ],
+          "required_zones": [
+            6,
+            17
+          ],
+          "returns": "Result",
+          "signature": "open_shell_session(session: int) -> Result",
+          "wire": "l\\c"
+        },
+        {
+          "doc": "Close Shell Session\n\nRelease the framed Linux shell and terminate its session\n\nOnly the matching session token can close the shell. MAIN menu and OneWili sessions stay connected.\n\nSession token (hex32)",
+          "is_setting": false,
+          "name": "close_shell_session",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "close_shell_session(session: int) -> Result",
+          "wire": "l\\e"
+        },
+        {
+          "doc": "Write Shell Session\n\nQueue up to 192 shell bytes and return the accepted byte count\n\nEncode bytes as compact hexadecimal, including CR, Ctrl-C and ANSI keys. Send only the unaccepted suffix after a short write. A failed or timed-out request must not be blindly replayed. Shell data never enters the MAIN command parser.\n\nSession token and compact hex data",
+          "is_setting": false,
+          "name": "write_shell_session",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            },
+            {
+              "name": "data",
+              "type": "str"
+            }
+          ],
+          "required_zones": [
+            6,
+            17
+          ],
+          "returns": "Result",
+          "signature": "write_shell_session(session: int, data: str) -> Result",
+          "wire": "l\\w"
+        },
+        {
+          "doc": "Read Shell Session\n\nRead bounded shell output as hexadecimal inside a normal menu response\n\nReturns count, compact hex data (a dash when empty), and running. Drain final output after running becomes false, then close. Empty reads renew the 30-second lease. Overflow or link reset fails explicitly; reopen before continuing.\n\nSession token and maximum bytes (1..192)",
+          "is_setting": false,
+          "name": "read_shell_session",
+          "params": [
+            {
+              "name": "session",
+              "type": "int"
+            },
+            {
+              "name": "maximum",
+              "type": "int"
+            }
+          ],
+          "required_zones": [
+            6,
+            17
+          ],
+          "returns": "Result",
+          "signature": "read_shell_session(session: int, maximum: int) -> Result",
+          "wire": "l\\r"
+        },
+        {
+          "doc": "CM0 USB Mode\n\nQuery or switch CM0 USB between PC gadget and USB-A Port 3 host; requires CM0 image support\n\nUse status to query the live mode and whether dynamic switching is supported. Use gadget for the PC connection or host for a USB device on Port 3 (CN25). Requires a CM0 image implementing USB-mode control; older images return a support/no-reply error and no switch is sent. Switching to host disconnects Gadget Serial. Use the MAIN connection, which remains available. Finish gadget transfers or host USB operations and unmount host storage before switching. The command changes the runtime mode only, not the boot default. Success confirms the applied mode and routing, not peripheral enumeration. Requests are not automatically replayed after a timeout; query status before retrying. Returns mode (gadget, host or passthrough) and switchable (0 or 1).\n\nMode: status, gadget or host",
+          "is_setting": false,
+          "name": "cm0_usb_mode",
+          "params": [
+            {
+              "name": "mode",
+              "type": "str"
+            }
+          ],
+          "required_zones": [
+            6,
+            17
+          ],
+          "returns": "Result",
+          "signature": "cm0_usb_mode(mode: str) -> Result",
+          "wire": "l\\u"
         }
       ]
     },
@@ -5198,6 +5781,177 @@
         }
       ]
     },
+    "Net": {
+      "attributes": {},
+      "doc": "Network (TCP/IP)",
+      "methods": [
+        {
+          "doc": "Status\n\nPrints one line of key=value TCP/IP stack status: lwip host up ncm_link ncm_mode ncm_ip ncm_mask ncm_gw ncm_mac ncm_dhcp t1s_link t1s_ip t1s_mask t1s_mac ncm_rx ncm_tx ncm_rxdrop ncm_txdrop t1s_rx t1s_tx t1s_rxdrop t1s_txdrop rx_nomem tcp_pcbs udp_pcbs tcp_echo udp_echo http mem_used mem_max pbuf_used pbuf_max bridge tcp_echo_bytes udp_sink echo_on http_on t1s_rxfilt. New keys are only ever APPENDED (host parsers key on names, never positions). lwip=0 means the stack is not compiled in; ncm_mode is static or dhcp, ncm_dhcp is off/init/discover/request/bound/renew/rebind/backoff/autoip/autoip-probe. Wire-parseable, append-only",
+          "is_setting": false,
+          "name": "net_status",
+          "params": [],
+          "returns": "Result",
+          "signature": "net_status() -> Result",
+          "wire": "i\\w\\s"
+        },
+        {
+          "doc": "Link Status\n\nReports the USB network adapter (NCM) link as lwIP sees it, the addressing mode, the current IP, the DHCP hostname and whether the NCM<->T1S bridge (which takes lwIP off both wires) is on",
+          "is_setting": false,
+          "name": "net_link_status",
+          "params": [],
+          "returns": "Result",
+          "signature": "net_link_status() -> Result",
+          "wire": "i\\w\\l"
+        },
+        {
+          "doc": "DHCP Renew\n\nAsks the DHCP client on the USB network adapter to renew its lease now. Fails when NCM Mode is static or DHCP is not running",
+          "is_setting": false,
+          "name": "net_dhcp_renew",
+          "params": [],
+          "returns": "Result",
+          "signature": "net_dhcp_renew() -> Result",
+          "wire": "i\\w\\r"
+        },
+        {
+          "doc": "Ping\n\nICMP echo client: sends count (1..5, default 3) echo requests to the dotted-decimal IPv4 address one at a time with a 1 s timeout each and prints seq=N rtt_ms=X or seq=N timeout per request, then sent= recv= min/avg/max. Blocks the console for up to count seconds; the stack keeps being serviced meanwhile\n\nIPv4 address, then count 1..5 (e.g. 10.55.0.1 3)",
+          "is_setting": false,
+          "name": "net_ping",
+          "params": [
+            {
+              "name": "ip",
+              "type": "str"
+            },
+            {
+              "name": "count",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "net_ping(ip: str, count: int) -> Result",
+          "wire": "i\\w\\p"
+        },
+        {
+          "doc": "Clear Counters\n\nZeros the net rx/tx/drop counters, ring high-water marks, service counters and the lwIP memory max/error marks. Addresses, links and services are unaffected",
+          "is_setting": false,
+          "name": "net_clear_counters",
+          "params": [],
+          "returns": "Result",
+          "signature": "net_clear_counters() -> Result",
+          "wire": "i\\w\\c"
+        },
+        {
+          "doc": "Apply\n\nRe-pushes the settings below into the stack (every setting change already applies live; this is for scripts and after a rejected address). Fails when an address does not parse -- the previous configuration stays live and the settings are resynced to it",
+          "is_setting": false,
+          "name": "net_apply",
+          "params": [],
+          "returns": "Result",
+          "signature": "net_apply() -> Result",
+          "wire": "i\\w\\a"
+        },
+        {
+          "doc": "NCM Mode\n\nAddressing mode of the USB network adapter: static uses NCM IP/Netmask/Gateway; dhcp runs the DHCP client (hostname freewili-xxxx) and falls back to an AutoIP 169.254.x.x address after 3 unanswered discovers. Applies live and persists",
+          "is_setting": true,
+          "name": "n_cm_mode",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "n_cm_mode(value: int) -> Result",
+          "wire": "i\\w\\m"
+        },
+        {
+          "doc": "NCM IP\n\nStatic IPv4 address of the USB network adapter (dotted decimal, default 10.55.0.2 -- the host tests expect this). Ignored while NCM Mode is dhcp. Rejected (previous kept) if it does not parse",
+          "is_setting": true,
+          "name": "n_cmip",
+          "params": [
+            {
+              "name": "value",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "n_cmip(value: str) -> Result",
+          "wire": "i\\w\\i"
+        },
+        {
+          "doc": "NCM Netmask\n\nStatic netmask of the USB network adapter (dotted decimal, default 255.255.255.0). Ignored while NCM Mode is dhcp",
+          "is_setting": true,
+          "name": "n_cm_netmask",
+          "params": [
+            {
+              "name": "value",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "n_cm_netmask(value: str) -> Result",
+          "wire": "i\\w\\k"
+        },
+        {
+          "doc": "NCM Gateway\n\nStatic default gateway on the USB network adapter (dotted decimal, default 10.55.0.1 = the host). Ignored while NCM Mode is dhcp",
+          "is_setting": true,
+          "name": "n_cm_gateway",
+          "params": [
+            {
+              "name": "value",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "n_cm_gateway(value: str) -> Result",
+          "wire": "i\\w\\g"
+        },
+        {
+          "doc": "T1S IP\n\nStatic IPv4 address of the 10BASE-T1S port's own lwIP netif (dotted decimal, default 10.56.0.2; static only, no gateway, never the default route)",
+          "is_setting": true,
+          "name": "t1sip",
+          "params": [
+            {
+              "name": "value",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "t1sip(value: str) -> Result",
+          "wire": "i\\w\\j"
+        },
+        {
+          "doc": "T1S Netmask\n\nStatic netmask of the 10BASE-T1S port's own netif (dotted decimal, default 255.255.255.0)",
+          "is_setting": true,
+          "name": "t1s_netmask",
+          "params": [
+            {
+              "name": "value",
+              "type": "str"
+            }
+          ],
+          "returns": "Result",
+          "signature": "t1s_netmask(value: str) -> Result",
+          "wire": "i\\w\\u"
+        },
+        {
+          "doc": "Echo Servers\n\nWhen on (default), the device runs the UDP echo server on port 5556, the UDP 5555 sink (swallows stray FWET test datagrams) and the TCP echo server on port 7 on every netif. Turning it off aborts live echo connections",
+          "is_setting": true,
+          "name": "echo_servers",
+          "params": [],
+          "returns": "Result",
+          "signature": "echo_servers() -> Result",
+          "wire": "i\\w\\e"
+        },
+        {
+          "doc": "HTTP Server\n\nWhen on (default), the device serves an HTML status page on port 80 (GET /) and the plain-text Status line (GET /status)",
+          "is_setting": true,
+          "name": "h_ttp_server",
+          "params": [],
+          "returns": "Result",
+          "signature": "h_ttp_server() -> Result",
+          "wire": "i\\w\\t"
+        }
+      ]
+    },
     "NiceUsb": {
       "attributes": {},
       "doc": "niceusb",
@@ -5294,6 +6048,8 @@
     "OneWili": {
       "attributes": {
         "apps": "Apps",
+        "binary_events": "BinaryEventQueue",
+        "binary_stream": "BinaryStream",
         "gui": "GUI",
         "hardware": "Hardware",
         "io": "IO",
@@ -5303,7 +6059,20 @@
         "wireless": "Wireless"
       },
       "doc": "A FreeWili device: every firmware menu is an attribute.",
-      "methods": []
+      "methods": [
+        {
+          "doc": "Open binary reception; raw=True preserves every frame. Unknown or malformed typed events fall back to RawFrame.",
+          "name": "open_binary",
+          "returns": "OneWili",
+          "signature": "open_binary(*, raw=False, queue_size=256) -> OneWili"
+        },
+        {
+          "doc": "Close the binary port while leaving text commands available.",
+          "name": "close_binary",
+          "returns": "",
+          "signature": "close_binary() -> None"
+        }
+      ]
     },
     "OrcaSettings": {
       "attributes": {},
@@ -5322,6 +6091,91 @@
           "returns": "Result",
           "signature": "orca_com_over_uart(value: int) -> Result",
           "wire": "h\\s\\g\\u"
+        }
+      ]
+    },
+    "PLCA": {
+      "attributes": {},
+      "doc": "PLCA Settings",
+      "methods": [
+        {
+          "doc": "PLCAEnabled\n\nWhen on, the PHY runs PLCA (collision-free round-robin transmit opportunities; the node with Local ID 0 coordinates the cycle). When off, the PHY falls back to CSMA/CD. Applied live to a running PHY",
+          "is_setting": true,
+          "name": "p_lca_enabled",
+          "params": [],
+          "returns": "Result",
+          "signature": "p_lca_enabled() -> Result",
+          "wire": "i\\r\\p\\a"
+        },
+        {
+          "doc": "Local ID\n\nThis node's PLCA ID (0..254). ID 0 is the cycle coordinator -- exactly one node on the segment must be 0. Applied live to a running PHY",
+          "is_setting": true,
+          "name": "local_id",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "local_id(value: int) -> Result",
+          "wire": "i\\r\\p\\l"
+        },
+        {
+          "doc": "Node Count\n\nNumber of transmit opportunities in each PLCA cycle (1..255); only meaningful on the coordinator (Local ID 0). Applied live to a running PHY",
+          "is_setting": true,
+          "name": "node_count",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "node_count(value: int) -> Result",
+          "wire": "i\\r\\p\\n"
+        },
+        {
+          "doc": "TO Timer\n\nPLCA transmit-opportunity timer in bit times (1..255, silicon default 32). Written directly to the PHY's PLCA_TOTMR register when it differs from 32. Applied live to a running PHY",
+          "is_setting": true,
+          "name": "t_o_timer",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "t_o_timer(value: int) -> Result",
+          "wire": "i\\r\\p\\t"
+        },
+        {
+          "doc": "Burst Max\n\nMaximum extra packets this node may send in one transmit opportunity (0..255, 0 = burst off). Takes effect at the next PHY (re)init -- use Reinit PHY (i\\r\\i) to apply",
+          "is_setting": true,
+          "name": "burst_max",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "burst_max(value: int) -> Result",
+          "wire": "i\\r\\p\\m"
+        },
+        {
+          "doc": "Burst Timer\n\nIdle time in bit times the PHY waits between burst packets before giving up the transmit opportunity (1..255). Takes effect at the next PHY (re)init -- use Reinit PHY (i\\r\\i) to apply",
+          "is_setting": true,
+          "name": "burst_timer",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "returns": "Result",
+          "signature": "burst_timer(value: int) -> Result",
+          "wire": "i\\r\\p\\b"
         }
       ]
     },
@@ -7251,7 +8105,7 @@
           "wire": "h\\a\\u"
         },
         {
-          "doc": "Device State\n\nReport the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id). More space-separated fields may be appended later.",
+          "doc": "Device State\n\nReport the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id), clk_sys in Hz. More space-separated fields may be appended later.",
           "is_setting": false,
           "name": "device_state",
           "params": [],
@@ -7272,6 +8126,219 @@
           "returns": "Result",
           "signature": "event_host_streaming(enable: int) -> Result",
           "wire": "h\\a\\e"
+        }
+      ]
+    },
+    "T1S": {
+      "attributes": {
+        "eth_test": "EthTest",
+        "plca": "PLCA",
+        "tc10": "T1STc10"
+      },
+      "doc": "Ethernet 10BaseT1S",
+      "methods": [
+        {
+          "doc": "Status\n\nPrints one line of key=value T1S engine status: state link plca plcaen id cnt to chipRev t1sTx t1sTxDrop t1sRx t1sRxDrop spiAbort errs evts faults lastErr lastEvt ... term tc10 wkgen wksrc. plca=1 means the PLCA cycle is locked; chipRev is 0 until the PHY initialized; tc10 is 0 awake / 1 sleep pending / 2 sleeping, wkgen counts TC10 wake generations requested, wksrc is the last wake source (bit1 MDI, bit0 WAKE_IN). Wire-parseable, append-only",
+          "is_setting": false,
+          "name": "t1s_status",
+          "params": [],
+          "returns": "Result",
+          "signature": "t1s_status() -> Result",
+          "wire": "i\\r\\s"
+        },
+        {
+          "doc": "Link Status\n\nReports the T1S link (up while the PHY is initialized and running), the engine state name and whether the NCM<->T1S bridge is on",
+          "is_setting": false,
+          "name": "t1s_link_status",
+          "params": [],
+          "returns": "Result",
+          "signature": "t1s_link_status() -> Result",
+          "wire": "i\\r\\k"
+        },
+        {
+          "doc": "Reinit PHY\n\nRequests a full PHY reinit: RST pulse plus fresh TC6 init with the current PLCA settings (this is how Burst Max/Burst Timer changes take effect). Also enables the T1S engine and clears the FAULT retry budget; bring-up itself still waits for the IO-header rail (zone 6)",
+          "is_setting": false,
+          "name": "t1s_reinit_phy",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "t1s_reinit_phy() -> Result",
+          "wire": "i\\r\\i"
+        },
+        {
+          "doc": "Clear Counters\n\nZeros the T1S TX/RX/drop/error counters (chip revision is kept). The engine state, link and bridge are unaffected",
+          "is_setting": false,
+          "name": "t1s_clear_counters",
+          "params": [],
+          "returns": "Result",
+          "signature": "t1s_clear_counters() -> Result",
+          "wire": "i\\r\\c"
+        },
+        {
+          "doc": "Register Read\n\nReads one 32-bit register from the LAN865x over the TC6 SPI protocol: MMS is the memory map selector (0..15), Address the 16-bit register address within it. Requires the PHY to be initialized and running\n\nDecimal MMS, Hex Register Address (e.g. 4 CA03)",
+          "is_setting": false,
+          "name": "t1s_register_read",
+          "params": [
+            {
+              "name": "mms",
+              "type": "int"
+            },
+            {
+              "name": "address",
+              "type": "int"
+            }
+          ],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "t1s_register_read(mms: int, address: int) -> Result",
+          "wire": "i\\r\\g"
+        },
+        {
+          "doc": "Bridge\n\nWhen on, host NCM frames forward to the T1S wire and T1S frames forward to the host (the local classifier/responder/loopback step aside) and the host adapter's link mirrors the T1S link. Always off after a reboot",
+          "is_setting": true,
+          "name": "bridge",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "bridge() -> Result",
+          "wire": "i\\r\\b"
+        }
+      ]
+    },
+    "T1STc10": {
+      "attributes": {},
+      "doc": "TC10 Wake/Sleep",
+      "methods": [
+        {
+          "doc": "Generate Wake\n\nEmits a TC10 wake-up from the running LAN865x: a 1 ms DME wake burst onto the MDI (Forward to MDI) and/or a 90 us pulse on the WAKE_OUT pin (Forward to WAKE_OUT), per the settings below. The engine polls the PHY until the request completes (see Wake Status gen/done/timeout). Fails when the PHY is not in run, neither forward target is enabled, or a previous wake is still busy",
+          "is_setting": false,
+          "name": "t1s_tc10_generate_wake",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "t1s_tc10_generate_wake() -> Result",
+          "wire": "i\\r\\w\\g"
+        },
+        {
+          "doc": "Wake Status\n\nPrints one line of key=value TC10 status: state (engine state, sleep while asleep) gen done busy timeout (wake generations requested/completed/in flight/expired) sleeps woke pulses (sleep entries, wake detections, local WAKE_IN pulses) src (last wake source: none/mdi/wakein/mdi+wakein) sts2 (raw PHY STS2) fwd wake (forward targets and wake sources as configured) inhdly (INH release delay code) sleepms (ms asleep, 0 when awake). Wire-parseable, append-only",
+          "is_setting": false,
+          "name": "t1s_tc10_wake_status",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "t1s_tc10_wake_status() -> Result",
+          "wire": "i\\r\\w\\s"
+        },
+        {
+          "doc": "Enter Sleep\n\nPuts the LAN865x into TC10 sleep with the configured wake sources (Wake on MDI / Wake on WAKE_IN) and forward targets. On Orca the PHY's INH output then cuts its own SPI/IRQ path, so the engine tears the link down after a short grace and parks in the sleep state until the chip wakes (MDI energy, a WAKE_IN pulse, Local Wake Pulse) or Cancel Sleep reinits it. Fails when the PHY is not in run or a sleep is already pending",
+          "is_setting": false,
+          "name": "t1s_tc10_enter_sleep",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "t1s_tc10_enter_sleep() -> Result",
+          "wire": "i\\r\\w\\e"
+        },
+        {
+          "doc": "Local Wake Pulse\n\nDrives a 200 us HIGH pulse on the PHY's WAKE_IN pin from the board's IO expander (which stays powered while the PHY sleeps). Only a sleeping PHY reacts (it wakes and the engine reinitializes it); harmless when awake. Fails if the expander is not configured or the I2C write fails",
+          "is_setting": false,
+          "name": "t1s_tc10_local_wake_pulse",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "t1s_tc10_local_wake_pulse() -> Result",
+          "wire": "i\\r\\w\\w"
+        },
+        {
+          "doc": "Cancel Sleep\n\nAbandons a pending sleep or leaves the sleep state by requesting a full PHY reinit (RST pulse + fresh init). Reports 'not sleeping' when no sleep is in progress",
+          "is_setting": false,
+          "name": "t1s_tc10_cancel_sleep",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "t1s_tc10_cancel_sleep() -> Result",
+          "wire": "i\\r\\w\\c"
+        },
+        {
+          "doc": "Forward to MDI\n\nWhen on, Generate Wake (and a wake forwarded during sleep) puts a 1 ms wake burst onto the MDI so the far end of the T1S segment wakes. At least one of Forward to MDI / Forward to WAKE_OUT must be on for Generate Wake to do anything",
+          "is_setting": true,
+          "name": "forward_to_mdi",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "forward_to_mdi() -> Result",
+          "wire": "i\\r\\w\\m"
+        },
+        {
+          "doc": "Forward to WAKE_OUT\n\nWhen on, Generate Wake (and a wake forwarded during sleep) emits a 90 us pulse on the PHY's WAKE_OUT pin (routed to the header on Orca; the host cannot observe it). At least one of Forward to MDI / Forward to WAKE_OUT must be on for Generate Wake to do anything",
+          "is_setting": true,
+          "name": "forward_to_wakeout",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "forward_to_wakeout() -> Result",
+          "wire": "i\\r\\w\\o"
+        },
+        {
+          "doc": "Wake on MDI\n\nWhen on, a sleeping PHY wakes on energy detected on the MDI (any activity, not only a TC10 wake burst). Applied at the next Enter Sleep",
+          "is_setting": true,
+          "name": "wake_on_mdi",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "wake_on_mdi() -> Result",
+          "wire": "i\\r\\w\\a"
+        },
+        {
+          "doc": "Wake on WAKE_IN\n\nWhen on, a sleeping PHY wakes on a HIGH pulse longer than 40 us on its WAKE_IN pin (Local Wake Pulse drives that pin from the IO expander). Applied at the next Enter Sleep",
+          "is_setting": true,
+          "name": "wake_on_wakein",
+          "params": [],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "wake_on_wakein() -> Result",
+          "wire": "i\\r\\w\\n"
+        },
+        {
+          "doc": "Sleep Inhibit Delay\n\nDelay before the PHY releases its INH output after entering sleep: 0 = 0 ms, 1 = 50 ms, 2 = 100 ms, 3 = 200 ms. On Orca INH powers the PHY's SPI/IRQ path, so this is how long the link stays reachable after Enter Sleep. Applied at the next Enter Sleep",
+          "is_setting": true,
+          "name": "sleep_inhibit_delay",
+          "params": [
+            {
+              "name": "value",
+              "type": "int"
+            }
+          ],
+          "required_zones": [
+            6
+          ],
+          "returns": "Result",
+          "signature": "sleep_inhibit_delay(value: int) -> Result",
+          "wire": "i\\r\\w\\y"
         }
       ]
     },
@@ -7821,7 +8888,7 @@
           "wire": "w\\w\\g"
         },
         {
-          "doc": "Connect to a Wifi Access Point\n\nConnect to a WAP with provided SSID and Password\n\nString: SSID, Password",
+          "doc": "Connect to a Wifi Access Point\n\nConnect to a WAP with provided SSID and Password\n\nSSID Password (quote if spaces, e.g. \"My Network\" password)",
           "is_setting": false,
           "name": "on_connect_to_station",
           "params": [
@@ -8214,6 +9281,15 @@
           "returns": "Result",
           "signature": "stop_zio() -> Result",
           "wire": "s\\b\\s"
+        },
+        {
+          "doc": "Probe Exec Window\n\nStages a known pattern in ZoomIO's SCRATCH_X exec window, runs the full core1 launch sequence, and reads it back\n\nProbe the SCRATCH_X execution window",
+          "is_setting": false,
+          "name": "exec_probe",
+          "params": [],
+          "returns": "Result",
+          "signature": "exec_probe() -> Result",
+          "wire": "s\\b\\x"
         }
       ]
     }
@@ -8222,7 +9298,7 @@
     "connect": {
       "doc": "Find a FreeWili with pyfwfinder and open its Main-processor serial port. binary=True also opens the FTDI binary-event port.",
       "returns": "OneWili",
-      "signature": "connect(serial=None, binary=False) -> OneWili"
+      "signature": "connect(serial=None, binary=False, *, raw=False, queue_size=256) -> OneWili"
     },
     "find_devices": {
       "doc": "All connected FreeWili devices (via pyfwfinder).",

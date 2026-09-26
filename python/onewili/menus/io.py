@@ -20,6 +20,9 @@ from .wil_eye import WILEye
 from .audio import Audio
 from .serial_leds import SerialLEDs
 from .nice_usb import NiceUsb
+from .cdc_perf import CdcPerf
+from .t1s import T1S
+from .net import Net
 
 
 class IO(MenuBase):
@@ -42,3 +45,6 @@ class IO(MenuBase):
         self.audio = Audio(transport, nav_path + "\\k")
         self.serial_leds = SerialLEDs(transport, nav_path + "\\l")
         self.nice_usb = NiceUsb(transport, nav_path + "\\n")
+        self.cdc_perf = CdcPerf(transport, nav_path + "\\y")
+        self.t1s = T1S(transport, nav_path + "\\r")
+        self.net = Net(transport, nav_path + "\\w")

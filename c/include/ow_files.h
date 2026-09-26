@@ -326,13 +326,14 @@ static char* ow_files_event_args(char* line, const char* id) {
  * does not interpret or validate the tag: a handshake frame (opened by
  * fwMenuX::callSubFunction) is tagged with the full navigation prefix to
  * that menu (e.g. "h\x\f"), while the later completion frame (emitted
- * directly by fwMenuFileSystem via rpConsole::printMenuResponse with a
- * literal string) uses a different, fixed tag (e.g. "x\f") -- see the put()/
+ * directly by fwMenuFileSystem via rpConsole::printMenuResponse) carries
+ * either the bare literal "x\f" (older firmware) or the same navigation
+ * prefix "h\x\f" (current firmware, via xferFramePath) -- see the put()/
  * get() doc comments below for the concrete shapes. Callers that need to
  * distinguish frames by tag (the completion loops) do their own tokenizing
- * via ow_files_tokenize instead of this helper; this one is for the
- * handshake loops, which must match on body content only and tolerate
- * whatever tag arrives.
+ * via ow_files_tokenize + ow_files_tag_matches instead of this helper; this
+ * one is for the handshake loops, which must match on body content only and
+ * tolerate whatever tag arrives.
  *
  * Returns false for anything not shaped like a framed response: an event
  * line ("[*..."), chatter with no leading '[', or a line with no trailing
@@ -404,15 +405,32 @@ static int ow_files_tokenize(char* line, char** tok, int maxTok) {
     return n;
 }
 
+/* Does a frame's path token name the completion frame we're waiting for?
+ * `tag` is the menu-relative spelling ("x\f" for put, "x\u" for get). The
+ * firmware has emitted the completion frame two ways: older builds passed
+ * the bare literal to printMenuResponse, so the path token was exactly
+ * "x\f"; current builds (fwMenuFileSystem::xferFramePath) print it under
+ * the full navigation prefix, so the path token is "h\x\f" -- the same tag
+ * the handshake frame carries. Accept both: an exact match, or `tag` as the
+ * final backslash-separated component of a longer path. Nothing shorter or
+ * merely containing the tag qualifies ("hx\f", "x\fz", "y\x\fq" all
+ * fail), so an unrelated framed response is still skipped rather than
+ * misread as this transfer's result. */
+static bool ow_files_tag_matches(const char* tok, const char* tag) {
+    size_t tl = strlen(tok), gl = strlen(tag);
+    if (tl == gl) return memcmp(tok, tag, gl) == 0;
+    return tl > gl && tok[tl - gl - 1] == '\\' && memcmp(tok + tl - gl, tag, gl) == 0;
+}
+
 /* A framed command response is "[<tag> <ts> <seq> <payload...> <ok>]" --
  * whatever the payload's own shape, the LAST token is always the trailing
  * ok flag (rpConsole::printEventResponse). Unlike ow_files_parse_frame (used
- * for the tag-tolerant handshake loops), this DOES require an exact tag
- * match: the completion frame's tag is a fixed literal the firmware source
- * hardcodes at the printMenuResponse call site (e.g. "x\f"), not something
- * that varies with menu navigation, so pinning to it here is safe and lets
- * an unrelated framed response (a different in-flight command's answer, for
- * instance) be skipped rather than misread as this transfer's result.
+ * for the tag-tolerant handshake loops), this DOES check the tag, via
+ * ow_files_tag_matches: the completion frame's path is either the bare
+ * literal ("x\f") or that literal under the navigation prefix ("h\x\f"),
+ * and requiring one of those two shapes lets an unrelated framed response
+ * (a different in-flight command's answer, for instance) be skipped rather
+ * than misread as this transfer's result.
  *
  * Returns 1 (ok) or 0 (not ok) on a tag match; -1 if `line` isn't a framed
  * response at all OR its tag doesn't match `tag` (caller should keep
@@ -425,7 +443,7 @@ static int ow_files_tokenize(char* line, char** tok, int maxTok) {
 static int ow_files_response_ok(char* line, const char* tag) {
     char* tok[OW_FILES_RESPONSE_TOKENS_MAX];
     int n = ow_files_tokenize(line, tok, OW_FILES_RESPONSE_TOKENS_MAX);
-    if (n < 1 || strcmp(tok[0], tag) != 0) return -1;
+    if (n < 1 || !ow_files_tag_matches(tok[0], tag)) return -1;
     if (n > OW_FILES_RESPONSE_TOKENS_MAX) return -2;
     const char* ok = tok[n - 1];
     if (ok[0] == '1' && ok[1] == '\0') return 1;
@@ -435,14 +453,15 @@ static int ow_files_response_ok(char* line, const char* tag) {
 
 /* A `get` trailer's payload is "success <N> bytes <CRC> crc" (fwMenuFileSystem
  * .cpp's doUpload), framed the usual way, so the full line reads
- * "[x\u <ts> <seq> success <N> bytes <CRC> crc <ok>]" -- note the fixed
- * "x\u" tag, not the handshake's "h\x\u" (see ow_files_parse_frame). As with
- * ow_files_response_ok, the tag is checked exactly: it's a literal the
- * firmware source hardcodes at the printMenuResponse call site, not derived
- * from navigation. Right-anchored beyond that: the last token is the ok
- * flag, the one before it the literal word "crc", and the one before THAT
- * the crc value -- checking the literal guards against silently reading the
- * wrong field if the payload shape is off.
+ * "[h\x\u <ts> <seq> success <N> bytes <CRC> crc <ok>]" on current firmware
+ * (xferFramePath: navigation prefix, same tag as the handshake) or
+ * "[x\u <ts> <seq> success <N> bytes <CRC> crc <ok>]" on older builds (bare
+ * literal). As with ow_files_response_ok, the tag is checked with
+ * ow_files_tag_matches, which accepts exactly those two spellings.
+ * Right-anchored beyond that: the last token is the ok flag, the one before
+ * it the literal word "crc", and the one before THAT the crc value --
+ * checking the literal guards against silently reading the wrong field if
+ * the payload shape is off.
  *
  * Sets *tag_matched to whether `tag` matched at all (false: caller should
  * keep waiting for the real trailer; true but return false: this WAS the
@@ -456,7 +475,7 @@ static bool ow_files_extract_trailer_crc(char* line, const char* tag, uint32_t* 
     *tag_matched = false;
     char* tok[OW_FILES_RESPONSE_TOKENS_MAX];
     int n = ow_files_tokenize(line, tok, OW_FILES_RESPONSE_TOKENS_MAX);
-    if (n < 1 || strcmp(tok[0], tag) != 0) return false;
+    if (n < 1 || !ow_files_tag_matches(tok[0], tag)) return false;
     *tag_matched = true;
     if (n < 3 || n > OW_FILES_RESPONSE_TOKENS_MAX) return false;
     if (strcmp(tok[n - 2], "crc") != 0) return false;
@@ -479,14 +498,16 @@ static bool ow_files_extract_trailer_crc(char* line, const char* tag, uint32_t* 
  *     [h\x\u <hexTimestampNs> <seq> RxFile 4096 1]
  *
  * and the frame's tag is the full navigation prefix to that menu ("h\x\f" for
- * put, "h\x\u" for get) -- a DIFFERENT tag from the completion frame below
- * ("x\f"/"x\u"), which comes from a direct printMenuResponse call with a
- * fixed literal, not through callSubFunction. That's why the handshake
- * parsing below (ow_files_parse_frame) is tag-tolerant -- matching on body
- * content only -- while the completion parsing (ow_files_response_ok /
- * ow_files_extract_trailer_crc) pins to the exact literal tag. Both
- * handshake lines are emitted with printOutAlways so quiet mode can't
- * suppress them. */
+ * put, "h\x\u" for get). The completion frame below comes from a direct
+ * printMenuResponse call, not through callSubFunction; current firmware
+ * builds its tag with xferFramePath (szMenuPrefix + hotkey, so again
+ * "h\x\f"/"h\x\u"), while older builds passed the bare literal
+ * "x\f"/"x\u". That's why the handshake parsing below
+ * (ow_files_parse_frame) is tag-tolerant -- matching on body content only
+ * -- while the completion parsing (ow_files_response_ok /
+ * ow_files_extract_trailer_crc) requires the tag either exactly or as the
+ * last path component (ow_files_tag_matches). Both handshake lines are
+ * emitted with printOutAlways so quiet mode can't suppress them. */
 
 ow_files_status ow_files_put(const ow_files_io* io, const char* dev_path,
                              const uint8_t* data, size_t len,
@@ -532,8 +553,10 @@ ow_files_status ow_files_put(const ow_files_io* io, const char* dev_path,
     }
 
     /* The device verifies its own CRC after the payload lands and reports
-     * the result as a framed "x\f" response: ok 1 on "success <N> bytes", ok
-     * 0 on "Failed checksum" (and it deletes the file in that case). */
+     * the result as a framed "x\f" response (tagged "h\x\f" on current
+     * firmware, bare "x\f" on older builds -- see ow_files_tag_matches): ok 1
+     * on "success <N> bytes", ok 0 on "Failed checksum" (and it deletes the
+     * file in that case). */
     for (;;) {
         int r = ow_files_read_line(&rx, line, sizeof line);
         if (r < 0) return OW_FILES_ERR_IO;
@@ -616,7 +639,8 @@ ow_files_status ow_files_get(const ow_files_io* io, const char* dev_path,
     }
     if (cb) cb(cb_ctx, got, size);
 
-    /* The crc lives ONLY in this trailer, a framed "x\u" response with body
+    /* The crc lives ONLY in this trailer, a framed "x\u" response (tagged
+     * "h\x\u" on current firmware, bare "x\u" on older builds) with body
      * "success <N> bytes <CRC> crc". No trailer, or one we can't parse,
      * means we do not have a crc to trust -- report a protocol error rather
      * than silently accepting the payload unverified. */

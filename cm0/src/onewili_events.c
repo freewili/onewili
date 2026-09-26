@@ -52,7 +52,10 @@ static ow_status ow__ev_gpio_report(const uint8_t* payload, uint32_t payload_len
 
 ow_status ow_decode_logic_analyzer_report(const uint8_t* payload, uint32_t payload_len, bool error, ow_evt_logic_analyzer_report* out)
 {
-    if (!payload || !out || payload_len != 44u) return OW_ERR_PROTOCOL;
+    if (!payload || !out || payload_len < 44u) return OW_ERR_PROTOCOL;
+    if ((payload_len - 44u) % 4u) return OW_ERR_PROTOCOL;
+    out->sample_data = payload + 44u;
+    out->sample_bytes = payload_len - 44u;
     out->trigger_time_stamp_ns = ow__rd_u64le(payload + 0);
     out->sample_rate_ns = ow__rd_u32le(payload + 8);
     out->gpio_start_pin = payload[12];
@@ -82,7 +85,7 @@ static ow_status ow__ev_logic_analyzer_report(const uint8_t* payload, uint32_t p
 const ow_event_decoder ow_event_decoders[] = {
     { 1, 84, "canRxReport", ow__ev_can_rx_report },
     { 0, 12, "gpioReport", ow__ev_gpio_report },
-    { 2, 44, "logicAnalyzerReport", ow__ev_logic_analyzer_report },
+    { 2, 0, "logicAnalyzerReport", ow__ev_logic_analyzer_report },
 };
 const size_t ow_event_decoder_count =
     sizeof ow_event_decoders / sizeof ow_event_decoders[0];

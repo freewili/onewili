@@ -256,3 +256,114 @@ class FileSystem(MenuBase):
             Result: Ok(None) or Err(message).
         """
         return self._call("k", [encoding.enc_int(host)], [])
+
+    def begin_file_read(self, session: int, path_hex: str) -> Result:
+        r"""Begin File Read.
+
+        Wire: ``h\x\0``
+
+        Open an SD file for bounded framed reads. Paths are UTF-8 encoded as compact hex and must be absolute; the session expires after 30 seconds of inactivity.
+
+        session=hex32,path_hex=string
+
+        Args:
+            session: session (hex32).
+            path_hex: path_hex (string).
+
+        Returns:
+            Result: Ok(size: int) or Err(message).
+        """
+        return self._call("0", [encoding.enc_hex(session, 8), encoding.enc_str(path_hex)], ["int"])
+
+    def begin_file_write(self, session: int, path_hex: str, size: int, crc32: int, overwrite: bool) -> Result:
+        r"""Begin File Write.
+
+        Wire: ``h\x\1``
+
+        Stage an upload beside its destination. Existing files are preserved until size and CRC32 validation succeeds. No raw USB mode is entered.
+
+        session=hex32,path_hex=string,size=decU32,crc32=hex32,overwrite=bool
+
+        Args:
+            session: session (hex32).
+            path_hex: path_hex (string).
+            size: size (decU32).
+            crc32: crc32 (hex32).
+            overwrite: overwrite (bool).
+
+        Returns:
+            Result: Ok(size: int) or Err(message).
+        """
+        return self._call("1", [encoding.enc_hex(session, 8), encoding.enc_str(path_hex), encoding.enc_int(size), encoding.enc_hex(crc32, 8), encoding.enc_bool(overwrite)], ["int"])
+
+    def read_file_chunk(self, session: int, offset: int, maximum: int) -> Result:
+        r"""Read File Chunk.
+
+        Wire: ``h\x\2``
+
+        Read the next 1 to 192 bytes as compact hex. Use the exact sequential offset; a dash means an empty file or EOF.
+
+        session=hex32,offset=decU32,maximum=decU32
+
+        Args:
+            session: session (hex32).
+            offset: offset (decU32).
+            maximum: maximum (decU32).
+
+        Returns:
+            Result: Ok(count: int, data: str) or Err(message).
+        """
+        return self._call("2", [encoding.enc_hex(session, 8), encoding.enc_int(offset), encoding.enc_int(maximum)], ["int", "str"])
+
+    def write_file_chunk(self, session: int, offset: int, data: str) -> Result:
+        r"""Write File Chunk.
+
+        Wire: ``h\x\3``
+
+        Write the next 1 to 192 hex-encoded bytes. Duplicate or out-of-order chunks are rejected; never replay an ambiguous timeout.
+
+        session=hex32,offset=decU32,data=string
+
+        Args:
+            session: session (hex32).
+            offset: offset (decU32).
+            data: data (string).
+
+        Returns:
+            Result: Ok(position: int) or Err(message).
+        """
+        return self._call("3", [encoding.enc_hex(session, 8), encoding.enc_int(offset), encoding.enc_str(data)], ["int"])
+
+    def finish_file_transfer(self, session: int) -> Result:
+        r"""Finish File Transfer.
+
+        Wire: ``h\x\4``
+
+        Verify the byte count, close the file and return CRC32. A complete verified upload is published; an incomplete or corrupt upload never replaces the destination.
+
+        session=hex32
+
+        Args:
+            session: session (hex32).
+
+        Returns:
+            Result: Ok(size: int, crc32: int) or Err(message).
+        """
+        return self._call("4", [encoding.enc_hex(session, 8)], ["int", "hex"])
+
+    def cancel_file_transfer(self, session: int) -> Result:
+        r"""Cancel File Transfer.
+
+        Wire: ``h\x\5``
+
+        Close the matching transfer and remove its incomplete staging file. Other shell and menu sessions remain available.
+
+        session=hex32
+
+        Args:
+            session: session (hex32).
+
+        Returns:
+            Result: Ok(None) or Err(message).
+        """
+        return self._call("5", [encoding.enc_hex(session, 8)], [])

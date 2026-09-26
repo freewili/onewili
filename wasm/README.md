@@ -18,6 +18,13 @@ natively, so there is no string assembly or frame parsing on the guest side.
 commands and have no OneWili equivalent: timing (`waitms`, `millis`),
 `wilirand`, the `log*` debug family, and file I/O.
 
+## Examples
+
+`examples/blink.c` / `rust/examples/blink.rs` toggle a GPIO; `examples/can_rx.c` /
+`rust/examples/can_rx.rs` poll the on-device CAN(FD) receive queue with
+`receive_canfd` and echo each frame - the on-device pattern for anything a host
+would receive as an event stream.
+
 ## Build
 
 Compile with the bundled wiliclang against the wasm32 target, `-nostdlib`,

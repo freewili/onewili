@@ -34,4 +34,12 @@ impl<'a> LightShowSettings<'a> {
         let _r = crate::transport::call(524 /* CMD_HARDWARE_SETTINGS_HOME_LIGHT_SHOW_SETTINGS_ROKU_LED_CONTROL */, &a)?;
         Ok(())
     }
+
+    /// Brightness. Onboard LED strip brightness divisor, 1 (brightest) to 16 (dimmest). Wire: `h\s\l\b`
+    pub fn brightness(&mut self, value: i32) -> Result<(), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.i32(value);
+        let _r = crate::transport::call(562 /* CMD_HARDWARE_SETTINGS_HOME_LIGHT_SHOW_SETTINGS_BRIGHTNESS */, &a)?;
+        Ok(())
+    }
 }

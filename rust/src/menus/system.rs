@@ -35,15 +35,16 @@ impl<'a> System<'a> {
         Ok(())
     }
 
-    /// Device State. Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id). More space-separated fields may be appended later.. Wire: `h\a\g`
-    pub fn device_state(&mut self) -> Result<(String, bool, String), OwError> {
+    /// Device State. Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id), clk_sys in Hz. More space-separated fields may be appended later.. Wire: `h\a\g`
+    pub fn device_state(&mut self) -> Result<(String, bool, String, i32), OwError> {
         let cmd = String::from("h\\a\\g");
         let resp = self.t.call(&cmd)?;
         let mut toks = resp.split_whitespace();
         let sd = encoding::rest_str(&mut toks);
         let hoststream = encoding::tok_bool(&mut toks)?;
         let activemask = encoding::rest_str(&mut toks);
-        Ok((sd, hoststream, activemask))
+        let clksyshz = encoding::tok_int(&mut toks)? as i32;
+        Ok((sd, hoststream, activemask, clksyshz))
     }
 
     /// Event Host Streaming. Enables or disables streaming of events to the host. When disabled, stream-class events are suppressed at the host output; protocol events still flow. Same gate as control bytes 0x05 (off) and 0x06 (on).. Wire: `h\a\e`

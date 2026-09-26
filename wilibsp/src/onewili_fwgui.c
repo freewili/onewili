@@ -2,6 +2,10 @@
 #include <string.h>
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
+#ifndef OWFW_NO_IRQ
+#include "hardware/irq.h"
+#include "hardware/structs/uart.h"
+#endif
 #include "pico/time.h"
 #include "onewili_sd.h"
 #include "ow_sdfs_frame.h"
@@ -26,34 +30,58 @@
 #define OWFW_CMD_SDFS      0x5F    /* FWGUI_API_SDFS_DATA           */
 #define OWFW_SDFS_SLOTS    8       /* SDFS RX frames buffered       */
 #define OWFW_SDFS_POLL_US  1000    /* an idle recv poll costs ~1 ms */
-#define OWFW_STREAM_MAX    1024    /* per-stream buffer             */
 #define OWFW_FRAME_MAX     512     /* incoming command frame payload cap */
+
+/* Receive path sizing.
+ *
+ * The link runs at 8 Mbaud (~800 KB/s) and MAIN's transmit is a blocking
+ * FIFO write gated by hardware flow control. The UART's 32-byte RX FIFO is
+ * 40 us of wire time, so a display app that drains it only from inside
+ * ow_poll_* calls stalls MAIN on CTS every time it draws a line of text --
+ * and a stalled MAIN main loop drops CAN frames. The UART RX interrupt below
+ * moves bytes into a 32 KB ring (40 ms of wire time) regardless of what the
+ * app is doing; the frame parser and the per-stream FIFOs run from the app's
+ * context via owfw_pump(). The binary stream FIFO holds ~340 canRxReport
+ * frames (96 bytes framed), the text FIFO ~35 64-byte CAN text events. */
+#define OWFW_RING_BITS     15
+#define OWFW_RING_SIZE     (1u << OWFW_RING_BITS)
+#define OWFW_RING_MASK     (OWFW_RING_SIZE - 1u)
+#define OWFW_TEXT_MAX      8192
+#define OWFW_BINARY_MAX    32768
 
 /* ── Per-stream byte FIFO ──────────────────────────────────────────────── */
 typedef struct {
-    uint8_t  buf[OWFW_STREAM_MAX];
-    uint32_t head, count;
+    uint8_t* buf;
+    uint32_t size, head, count;
+    uint32_t* max_fill;
 } owfw_fifo;
 
-static owfw_fifo g_text;     /* 0x5D: responses + "[*" text events */
-static owfw_fifo g_binary;   /* 0x5E: binary WILI event bytes      */
-static uint32_t  g_dropped;
+static ow_fwgui_stats g_stats;
+static uint8_t  g_text_buf[OWFW_TEXT_MAX];
+static uint8_t  g_binary_buf[OWFW_BINARY_MAX];
+static owfw_fifo g_text   = { g_text_buf,   OWFW_TEXT_MAX,   0, 0, &g_stats.text_max_fill };   /* 0x5D */
+static owfw_fifo g_binary = { g_binary_buf, OWFW_BINARY_MAX, 0, 0, &g_stats.binary_max_fill }; /* 0x5E */
 
 static void fifo_push_frame(owfw_fifo* f, const uint8_t* p, uint32_t n) {
-    if (n > OWFW_STREAM_MAX - f->count) { g_dropped++; return; }  /* drop-newest, whole frame */
-    for (uint32_t i = 0; i < n; i++) {
-        f->buf[(f->head + f->count) % OWFW_STREAM_MAX] = p[i];
-        f->count++;
-    }
+    uint32_t w, first;
+    if (n > f->size - f->count) { g_stats.dropped_frames++; return; }  /* drop-newest, whole frame */
+    w = (f->head + f->count) % f->size;
+    first = f->size - w;
+    if (first > n) first = n;
+    memcpy(f->buf + w, p, first);
+    if (n > first) memcpy(f->buf, p + first, n - first);
+    f->count += n;
+    if (f->count > *f->max_fill) *f->max_fill = f->count;
 }
 
 static uint32_t fifo_pop(owfw_fifo* f, uint8_t* out, uint32_t cap) {
     uint32_t n = f->count < cap ? f->count : cap;
-    for (uint32_t i = 0; i < n; i++) {
-        out[i] = f->buf[f->head];
-        f->head = (f->head + 1) % OWFW_STREAM_MAX;
-        f->count--;
-    }
+    uint32_t first = f->size - f->head;
+    if (first > n) first = n;
+    memcpy(out, f->buf + f->head, first);
+    if (n > first) memcpy(out + first, f->buf, n - first);
+    f->head = (f->head + n) % f->size;
+    f->count -= n;
     return n;
 }
 
@@ -71,7 +99,7 @@ static uint32_t       g_sdfs_head, g_sdfs_count;
 
 static void sdfs_push(const uint8_t* p, uint16_t n) {
     owfw_sdfs_slot* s;
-    if (n > SDFS_MAX_FRAME || g_sdfs_count >= OWFW_SDFS_SLOTS) { g_dropped++; return; }
+    if (n > SDFS_MAX_FRAME || g_sdfs_count >= OWFW_SDFS_SLOTS) { g_stats.dropped_frames++; return; }
     s = &g_sdfs[(g_sdfs_head + g_sdfs_count) % OWFW_SDFS_SLOTS];
     memcpy(s->buf, p, n);
     s->len = n;
@@ -120,20 +148,75 @@ static void rx_byte(uint8_t b) {
     case RX_CK1:
         g_rx.ck |= (uint16_t)(b << 8);
         if (g_rx.ck == g_rx.sum && !g_rx.overlong) {
-            if (g_rx.cmd == OWFW_CMD_RESPONSE) fifo_push_frame(&g_text, g_rx.payload, g_rx.len);
-            else if (g_rx.cmd == OWFW_CMD_BINARY) fifo_push_frame(&g_binary, g_rx.payload, g_rx.len);
-            else if (g_rx.cmd == OWFW_CMD_SDFS) sdfs_push(g_rx.payload, g_rx.len);
-            /* every other command code (GUI traffic) is discarded */
+            if (g_rx.cmd == OWFW_CMD_RESPONSE) { g_stats.frames_text++;   fifo_push_frame(&g_text, g_rx.payload, g_rx.len); }
+            else if (g_rx.cmd == OWFW_CMD_BINARY) { g_stats.frames_binary++; fifo_push_frame(&g_binary, g_rx.payload, g_rx.len); }
+            else if (g_rx.cmd == OWFW_CMD_SDFS) { g_stats.frames_sdfs++;   sdfs_push(g_rx.payload, g_rx.len); }
+            else g_stats.frames_other++;     /* every other command code (GUI traffic) is discarded */
+        } else {
+            g_stats.checksum_errors++;
         }
         g_rx.st = RX_SYNC0;
         break;
     }
 }
 
-static void owfw_pump(void) {
-    while (uart_is_readable(uart0))
-        rx_byte((uint8_t)uart_getc(uart0));
+/* ── UART RX interrupt -> ring ─────────────────────────────────────────── */
+/* OWFW_NO_IRQ (host test builds): no interrupt controller, the pump polls the
+ * UART with uart_is_readable/uart_getc into the same ring instead. */
+static uint8_t           g_ring[OWFW_RING_SIZE];
+static volatile uint32_t g_ring_head;     /* written by the IRQ only  */
+static volatile uint32_t g_ring_tail;     /* written by the pump only */
+static bool              g_irq_installed;
+
+#ifdef OWFW_NO_IRQ
+static void owfw_poll_uart(void) {
+    uint32_t head = g_ring_head;
+    uint32_t tail = g_ring_tail;
+    while (uart_is_readable(uart0)) {
+        uint8_t b = (uint8_t)uart_getc(uart0);
+        if (head - tail >= OWFW_RING_SIZE) { g_stats.ring_overrun_bytes++; continue; }
+        g_ring[head & OWFW_RING_MASK] = b;
+        head++;
+    }
+    g_ring_head = head;
+    if (head - tail > g_stats.ring_max_fill) g_stats.ring_max_fill = head - tail;
 }
+#else
+static void owfw_uart_irq(void) {
+    uart_hw_t* hw = uart_get_hw(uart0);
+    uint32_t head = g_ring_head;
+    uint32_t tail = g_ring_tail;
+    if (hw->rsr & UART_UARTRSR_OE_BITS) {
+        g_stats.hw_overruns++;
+        hw->rsr = UART_UARTRSR_OE_BITS;      /* write-to-clear */
+    }
+    while (!(hw->fr & UART_UARTFR_RXFE_BITS)) {
+        uint8_t b = (uint8_t)hw->dr;         /* the read also pops error flags */
+        if (head - tail >= OWFW_RING_SIZE) { g_stats.ring_overrun_bytes++; continue; }
+        g_ring[head & OWFW_RING_MASK] = b;
+        head++;
+    }
+    g_ring_head = head;
+    if (head - tail > g_stats.ring_max_fill) g_stats.ring_max_fill = head - tail;
+}
+#endif
+
+static void owfw_pump(void) {
+#ifdef OWFW_NO_IRQ
+    owfw_poll_uart();
+#endif
+    uint32_t tail = g_ring_tail;
+    uint32_t head = g_ring_head;
+    while (tail != head) {
+        rx_byte(g_ring[tail & OWFW_RING_MASK]);
+        tail++;
+    }
+    g_ring_tail = tail;
+}
+
+void ow_fwgui_pump(void) { owfw_pump(); }
+
+uint32_t ow_fwgui_ring_fill(void) { return g_ring_head - g_ring_tail; }
 
 /* ── TX: wrap command bytes into marked M_TERM_INPUT event frames ──────── */
 /* frame: B0 1D | len u16le | payload | cksum u16le, where payload =
@@ -153,11 +236,12 @@ static void owfw_send_chunk(const uint8_t* text, uint8_t n) {
     for (uint32_t i = 0; i < k; i++) sum = (uint16_t)(sum + f[i]);
     f[k++] = (uint8_t)(sum & 0xFF); f[k++] = (uint8_t)(sum >> 8);
     uart_write_blocking(uart0, f, k);
+    g_stats.tx_bytes += k;
 }
 
-/* Generic B0 1D event frame: sync | len u16le (excludes the event code) |
+/* Generic B0 1D event frame: sync | len u16le (excludes event code) |
  * event code | payload | cksum u16le (additive sum over every preceding
- * byte). Fire-and-forget, like owfw_send_chunk -- no response is read. */
+ * byte). Fire-and-forget, like owfw_send_chunk — no response is read. */
 static void owfw_send_event(uint8_t event_code, const uint8_t* payload, uint8_t n) {
     uint8_t f[2 + 2 + 1 + 32 + 2];
     uint16_t len = (uint16_t)n;
@@ -170,6 +254,7 @@ static void owfw_send_event(uint8_t event_code, const uint8_t* payload, uint8_t 
     for (uint32_t i = 0; i < k; i++) sum = (uint16_t)(sum + f[i]);
     f[k++] = (uint8_t)(sum & 0xFF); f[k++] = (uint8_t)(sum >> 8);
     uart_write_blocking(uart0, f, k);
+    g_stats.tx_bytes += k;
 }
 
 static int owfw_write(void* ctx, const uint8_t* data, size_t len) {
@@ -210,6 +295,7 @@ static int owfw_sdfs_send(void* ctx, const uint8_t* frame, size_t len) {
     n = ow_sdfs_frame_event(f, sizeof f, frame, len);
     if (n == 0) return -1;
     uart_write_blocking(uart0, f, n);
+    g_stats.tx_bytes += (uint32_t)n;
     return 0;
 }
 
@@ -250,18 +336,39 @@ ow_status ow_open_fwgui(ow_device* dev) {
     ow_status st;
     sdfs_transport_t sd;
     ow_transport t;
+#ifndef OWFW_NO_IRQ
+    if (g_irq_installed) {
+        irq_set_enabled(UART0_IRQ, false);
+    }
+#endif
     memset(&g_rx, 0, sizeof g_rx);
-    memset(&g_text, 0, sizeof g_text);
-    memset(&g_binary, 0, sizeof g_binary);
+    g_text.head = g_text.count = 0;
+    g_binary.head = g_binary.count = 0;
     memset(g_sdfs, 0, sizeof g_sdfs);
     g_sdfs_head = g_sdfs_count = 0;
-    g_dropped = 0;
+    memset(&g_stats, 0, sizeof g_stats);
+    g_ring_head = g_ring_tail = 0;
     uart_init(uart0, 8000000);   /* OWFW_BAUD */
     gpio_set_function(OWFW_PIN_TX,  GPIO_FUNC_UART);
     gpio_set_function(OWFW_PIN_RX,  GPIO_FUNC_UART);
     gpio_set_function(OWFW_PIN_CTS, GPIO_FUNC_UART);
     gpio_set_function(OWFW_PIN_RTS, GPIO_FUNC_UART);
     uart_set_hw_flow(uart0, true, true);
+#ifndef OWFW_NO_IRQ
+    uart_set_fifo_enabled(uart0, true);
+    /* RX interrupt: fires at half a FIFO (16 bytes = 20 us of wire time) or
+     * on the receive timeout for a partial FIFO, and drains into the ring. */
+    if (!g_irq_installed) {
+        irq_set_exclusive_handler(UART0_IRQ, owfw_uart_irq);
+        g_irq_installed = true;
+    }
+    uart_set_irq_enables(uart0, true, false);
+    hw_write_masked(&uart_get_hw(uart0)->ifls,
+                    2u << UART_UARTIFLS_RXIFLSEL_LSB, UART_UARTIFLS_RXIFLSEL_BITS);
+    irq_set_enabled(UART0_IRQ, true);
+#else
+    (void)g_irq_installed;
+#endif
     t.ctx = 0;
     t.write = owfw_write;
     t.read = owfw_read_text;
@@ -282,7 +389,11 @@ ow_transport ow_fwgui_binary_transport(void) {
     return t;
 }
 
-uint32_t ow_fwgui_dropped_frames(void) { return g_dropped; }
+uint32_t ow_fwgui_dropped_frames(void) { return g_stats.dropped_frames; }
+
+void ow_fwgui_get_stats(ow_fwgui_stats* out) {
+    if (out) *out = g_stats;
+}
 
 void ow_fwgui_send_power_zones(uint32_t zone_mask) {
     uint8_t payload[3] = {
