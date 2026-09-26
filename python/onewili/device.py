@@ -33,17 +33,36 @@ class OneWili:
         self._transport.open()
         return self
 
-    def open_binary(self) -> "OneWili":
+    def open_binary(self, *, raw: bool = False, queue_size: int = 256) -> "OneWili":
+        """Open streaming. raw=True delivers RawFrame for every message type."""
         if self._binary is not None:
+            if self._binary.raw != raw or self._binary.events.maxsize != queue_size:
+                raise ValueError("close_binary() before changing stream options")
+            self._binary.open()
             return self
         if self._binary_port is None:
             raise RuntimeError(
                 "no binary port known - pass binary_port=... or use connect(binary=True)")
         from . import binary_events
         from .binary_transport import BinaryTransport
-        self._binary = BinaryTransport(self._binary_port, binary_events.DECODERS)
-        self._binary.open()
+        stream = BinaryTransport(self._binary_port, binary_events.DECODERS,
+                                 raw=raw, queue_size=queue_size)
+        stream.open()
+        self._binary = stream
         return self
+
+    @property
+    def binary_stream(self):
+        """Stream status: last_error, dropped_events, unknown_frames, size_mismatches."""
+        if self._binary is None:
+            raise RuntimeError("binary port not open - call open_binary() first")
+        return self._binary
+
+    def close_binary(self) -> None:
+        """Stop the reader and release the binary port; text commands stay open."""
+        if self._binary is not None:
+            self._binary.close()
+            self._binary = None
 
     @property
     def binary_events(self):
@@ -62,9 +81,7 @@ class OneWili:
         return self._files
 
     def close(self) -> None:
-        if self._binary is not None:
-            self._binary.close()
-            self._binary = None
+        self.close_binary()
         self._transport.close()
 
     def __enter__(self) -> "OneWili":

@@ -14,8 +14,7 @@ public:
   ~OneWiliLink();
   ow_transport transport();
 private:
-  // shared_ptr-owned so a late on_console delivery (ConsoleClient invokes the
-  // callback OUTSIDE its cb_mtx_) can't touch a destroyed OneWiliLink.
+  // The callback owns the receive buffer and detaches before link destruction.
   struct Rx { std::mutex m; std::condition_variable cv; std::deque<uint8_t> q; };
   static int c_write(void* ctx, const uint8_t* data, size_t len);
   static int c_read(void* ctx, uint8_t* buf, size_t cap, uint32_t timeout_ms);

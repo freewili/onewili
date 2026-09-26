@@ -61,6 +61,15 @@ impl OneWili {
         Ok(())
     }
 
+    /// Receive any binary message without decoding or dropping unknown types.
+    /// Consumes the same stream as poll_event; choose one consumer.
+    pub fn poll_binary_frame(&mut self) -> Result<Option<binary_framing::RawFrame>, OwError> {
+        match self.binary.as_mut() {
+            Some(b) => b.poll_raw(),
+            None => Err(OwError::Io("binary port not open".into())),
+        }
+    }
+
     /// Next decoded event - binary frames first, then text events.
     /// Never blocks; returns Ok(None) when nothing is pending.
     pub fn poll_event(&mut self) -> Result<Option<events::Event>, OwError> {

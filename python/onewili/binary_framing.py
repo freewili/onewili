@@ -12,7 +12,7 @@ from dataclasses import dataclass
 MARKER_BYTES = b"WILI"
 HEADER_FMT = "<IHHI"          # marker, repeat_count, header_type, errorbit+length
 HEADER_SIZE = 12
-MAX_PAYLOAD = 1 << 20         # sanity cap; larger claimed lengths force a resync
+MAX_PAYLOAD = (1 << 20) + 2048 + 44  # largest firmware digital + analog capture
 
 
 @dataclass
@@ -30,10 +30,10 @@ class Parser:
         self.reset()
 
     def reset(self) -> None:
-        self._buf = b""
+        self._buf = bytearray()
 
     def feed(self, data: bytes) -> "list[RawFrame]":
-        self._buf += data
+        self._buf.extend(data)
         frames: list[RawFrame] = []
         while True:
             i = self._buf.find(MARKER_BYTES)
@@ -56,7 +56,7 @@ class Parser:
             frames.append(RawFrame(
                 header_type=htype,
                 repeat_count=repeat,
-                payload=self._buf[HEADER_SIZE:HEADER_SIZE + length],
+                payload=bytes(self._buf[HEADER_SIZE:HEADER_SIZE + length]),
                 error=bool(err_len & 0x80000000),
             ))
             self._buf = self._buf[HEADER_SIZE + length:]

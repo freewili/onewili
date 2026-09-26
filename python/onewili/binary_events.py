@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import struct
+from .binary_samples import LogicAnalyzerSamples
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,7 +45,7 @@ def _decode_gpio_report(payload: bytes, error: bool) -> GpioReportEvent:
     return GpioReportEvent(*args, error)
 
 @dataclasses.dataclass(frozen=True)
-class LogicAnalyzerReportEvent:
+class LogicAnalyzerReportEvent(LogicAnalyzerSamples):
     trigger_time_stamp_ns: int
     sample_rate_ns: int
     gpio_start_pin: int
@@ -63,10 +64,12 @@ class LogicAnalyzerReportEvent:
     analog_trigger_location: int
     error: bool
 
+    sample_data: bytes = b""
+
 _LOGIC_ANALYZER_REPORT_FMT = "<QIBBBBIIBBBBIIII"
 
 def _decode_logic_analyzer_report(payload: bytes, error: bool) -> LogicAnalyzerReportEvent:
-    vals = struct.unpack(_LOGIC_ANALYZER_REPORT_FMT, payload)
+    vals = struct.unpack_from(_LOGIC_ANALYZER_REPORT_FMT, payload)
     args = []
     i = 0
     args.append(vals[i]); i += 1
@@ -85,10 +88,12 @@ def _decode_logic_analyzer_report(payload: bytes, error: bool) -> LogicAnalyzerR
     args.append(vals[i]); i += 1
     args.append(vals[i]); i += 1
     args.append(vals[i]); i += 1
-    return LogicAnalyzerReportEvent(*args, error)
+    event = LogicAnalyzerReportEvent(*args, error, payload[44:])
+    event.validate()
+    return event
 
 DECODERS = {
     1: ("canRxReport", 84, _decode_can_rx_report),
     0: ("gpioReport", 12, _decode_gpio_report),
-    2: ("logicAnalyzerReport", 44, _decode_logic_analyzer_report),
+    2: ("logicAnalyzerReport", -44, _decode_logic_analyzer_report),
 }

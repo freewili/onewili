@@ -24,6 +24,7 @@ extern "C" {
 #ifndef OW_BIN_MAX_PAYLOAD
 #define OW_BIN_MAX_PAYLOAD 4096u
 #endif
+#define OW_BIN_CAPTURE_CAPACITY (1048576u + 2048u + 44u)
 
 typedef struct ow_bin_frame {
     uint16_t header_type;
@@ -37,6 +38,8 @@ typedef struct ow_bin_parser {
     uint8_t  hdr[OW_BIN_HEADER_SIZE];
     uint32_t hdr_fill;
     uint8_t  payload[OW_BIN_MAX_PAYLOAD];
+    uint8_t* storage;         /* optional caller-owned buffer for large frames */
+    uint32_t capacity;
     uint32_t payload_fill;
     uint32_t payload_len;     /* expected, from the accepted header */
     uint16_t header_type, repeat_count;
@@ -46,6 +49,8 @@ typedef struct ow_bin_parser {
 } ow_bin_parser;
 
 void ow_bin_parser_init(ow_bin_parser* p);
+/* Buffer must outlive parser use. NULL restores the inline buffer. */
+void ow_bin_parser_init_buffer(ow_bin_parser* p, uint8_t* buffer, uint32_t capacity);
 
 /* Consume input; returns bytes consumed (<= len). Sets *out_ready = 1 and
  * fills *out when a complete frame is available - call again with the
@@ -83,6 +88,13 @@ static void ow_bin__resync(ow_bin_parser* p) {
 
 void ow_bin_parser_init(ow_bin_parser* p) {
     memset(p, 0, sizeof *p);
+    p->capacity = OW_BIN_MAX_PAYLOAD;
+}
+
+void ow_bin_parser_init_buffer(ow_bin_parser* p, uint8_t* buffer, uint32_t capacity) {
+    ow_bin_parser_init(p);
+    p->storage = buffer;
+    if (buffer) p->capacity = capacity;
 }
 
 size_t ow_bin_parser_feed(ow_bin_parser* p, const uint8_t* data, size_t len,
@@ -105,7 +117,7 @@ size_t ow_bin_parser_feed(ow_bin_parser* p, const uint8_t* data, size_t len,
                 p->error = (lw & 0x80000000u) != 0u;
                 p->payload_len = lw & 0x7FFFFFFFu;
             }
-            if (p->payload_len > OW_BIN_MAX_PAYLOAD) {
+            if (p->payload_len > p->capacity) {
                 ow_bin__resync(p);   /* bogus length: not a real header */
                 continue;
             }
@@ -117,13 +129,13 @@ size_t ow_bin_parser_feed(ow_bin_parser* p, const uint8_t* data, size_t len,
             uint32_t want = p->payload_len - p->payload_fill;
             size_t avail = len - used;
             uint32_t take = (uint32_t)(avail < (size_t)want ? avail : (size_t)want);
-            memcpy(p->payload + p->payload_fill, data + used, take);
+            memcpy((p->storage ? p->storage : p->payload) + p->payload_fill, data + used, take);
             p->payload_fill += take;
             used += take;
             if (p->payload_fill == p->payload_len) {
                 out->header_type  = p->header_type;
                 out->repeat_count = p->repeat_count;
-                out->payload      = p->payload;
+                out->payload      = p->storage ? p->storage : p->payload;
                 out->payload_len  = p->payload_len;
                 out->error        = p->error;
                 p->in_payload = false;
@@ -136,7 +148,7 @@ size_t ow_bin_parser_feed(ow_bin_parser* p, const uint8_t* data, size_t len,
     if (p->in_payload && p->payload_fill == p->payload_len) {
         out->header_type  = p->header_type;
         out->repeat_count = p->repeat_count;
-        out->payload      = p->payload;
+        out->payload      = p->storage ? p->storage : p->payload;
         out->payload_len  = p->payload_len;
         out->error        = p->error;
         p->in_payload = false;

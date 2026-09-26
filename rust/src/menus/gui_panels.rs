@@ -40,4 +40,22 @@ impl<'a> GuiPanels<'a> {
         self.t.call(&cmd)?;
         Ok(())
     }
+
+    /// Set Menu Text. Sets a custom panel menu button label (up to 15 bytes).. Wire: `g\c\f`
+    pub fn set_menu_text(&mut self, button: i32, text: &str) -> Result<(), OwError> {
+        let mut cmd = String::from("g\\c\\f");
+        encoding::push_int(&mut cmd, button as i64);
+        encoding::push_str(&mut cmd, text);
+        self.t.call(&cmd)?;
+        Ok(())
+    }
+
+    /// Read Buttons. Returns and clears the panel and keypad button press bitmask.. Wire: `g\c\e`
+    pub fn read_buttons(&mut self) -> Result<u32, OwError> {
+        let cmd = String::from("g\\c\\e");
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let pressed = encoding::tok_hex(&mut toks)? as u32;
+        Ok(pressed)
+    }
 }

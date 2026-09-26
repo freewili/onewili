@@ -44,4 +44,20 @@ impl<'a> GuiPanels<'a> {
         let _r = crate::transport::call(113 /* CMD_GUI_PANELS_SHOW_PANEL */, &a)?;
         Ok(())
     }
+
+    /// Set Menu Text. Sets a custom panel menu button label (up to 15 bytes).. Wire: `g\c\f`
+    pub fn set_menu_text(&mut self, button: i32, text: &str) -> Result<(), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.i32(button);
+        a.str(text);
+        let _r = crate::transport::call(602 /* CMD_GUI_PANELS_SET_MENU_TEXT */, &a)?;
+        Ok(())
+    }
+
+    /// Read Buttons. Returns and clears the panel and keypad button press bitmask.. Wire: `g\c\e`
+    pub fn read_buttons(&mut self) -> Result<u32, OwError> {
+        let a = crate::transport::Args::new();
+        let mut _r = crate::transport::call(601 /* CMD_GUI_PANELS_READ_BUTTONS */, &a)?;
+        Ok(_r.u32())
+    }
 }

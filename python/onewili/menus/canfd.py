@@ -431,3 +431,132 @@ s 0 0x010 1 0xA5
             Result: Ok(None) or Err(message).
         """
         return self._call("s", [encoding.enc_int(channel), encoding.enc_hex(start_address, 8), encoding.enc_int(byte_count), encoding.enc_hex(word_to_write, 8)], [])
+
+    def enable_canfd_receive_queue(self, channel: int, enabled: int) -> Result:
+        r"""Enable CAN(FD) Receive Queue.
+
+        Wire: ``i\c\e``
+
+        Enables or disables the on-device receive queue that receive_canfd (v) reads from.
+
+        ## Enable CAN(FD) Receive Queue
+
+Arms or disarms the on-device receive queue for the selected channel. While armed, every frame the controller receives is copied into a small ring on the MAIN CPU, where `Receive CAN(FD)` (`v`) pops it one frame per call. This is the receive path for scripts running **on the device** (rthon, WASM): they drive commands through the local menu executor and only ever see a command's own response, never the spontaneous `[*can0 ...]` event lines that `Stream CAN(FD)` (`o`) sends to a host.
+
+### Arguments
+
+- `channel` — CAN controller index
+  - `0` — CAN channel 0 (`obCANFD1`)
+  - `1` — CAN channel 1 (`obCANFD2`)
+  - Note: FreeWili2 only has one CAN channel; channel `1` is reserved for future Orcas.
+- `enabled` — queue state
+  - `0` — disable the queue (frees its storage and clears the queued and dropped counts)
+  - `1` — enable the queue
+
+### Returns
+
+- `success` — `1` if the queue is now in the requested state, `0` otherwise. `Invalid` means an argument did not parse; `Failed` means enabling could not get storage (PSRAM unavailable).
+
+### Example
+
+```
+e 0 1   # arm the receive queue on channel 0 before traffic starts
+e 0 0   # disarm it and release its storage
+```
+
+### Notes
+
+- Depth is 32 frames per channel. When the queue is full the **oldest** frame is dropped to make room and a per-channel `dropped` counter is incremented; `Receive CAN(FD)` reports that counter with every response so a slow poller can tell how much it missed.
+- Storage is allocated in PSRAM when the queue is enabled and released when it is disabled, so an idle queue costs no memory.
+- The queue is independent of the host stream (`o`): both can be on at once and neither steals frames from the other.
+- Enabling is idempotent: enabling an already-armed queue keeps its contents and counters.
+- `Receive CAN(FD)` (`v`) auto-enables the queue on its first use, so calling `e` is only needed to disable it or to pre-arm it before traffic starts (frames received before the queue is armed are not queued).
+- Requires power zone 15 (the CAN transceiver zone).
+
+        Enter Channel and enable state
+
+        Args:
+            channel: channel (decS32).
+            enabled: enabled (decS32).
+
+        Returns:
+            Result: Ok(None) or Err(message).
+        """
+        return self._call("e", [encoding.enc_int(channel), encoding.enc_int(enabled)], [])
+
+    def receive_canfd(self, channel: int) -> Result:
+        r"""Receive CAN(FD).
+
+        Wire: ``i\c\v``
+
+        Pops the oldest received CAN(FD) frame from the on-device receive queue (frame=0 when empty).
+
+        ## Receive CAN(FD)
+
+Pops the oldest frame from the selected channel's on-device receive queue and returns it. Intended for scripts running on the device (rthon, WASM) that cannot see the `[*can0 ...]` stream events; a host can use it too. Call it repeatedly until `frame` is `0` to drain the queue.
+
+### Arguments
+
+- `channel` — CAN controller index
+  - `0` — CAN channel 0 (`obCANFD1`)
+  - `1` — CAN channel 1 (`obCANFD2`)
+  - Note: FreeWili2 only has one CAN channel; channel `1` is reserved for future Orcas.
+
+### Returns
+
+Fields are returned in this order, space-separated:
+
+- `frame` — `1` if a frame was returned, `0` if the queue was empty. When `0`, every other field is `0` except `dropped`, and `data` is empty.
+- `queued` — frames still waiting in the queue **after** this pop.
+- `dropped` — running count of frames discarded (oldest first) because the queue was full, since it was enabled.
+- `arbId` — arbitration ID in hex, no `0x` prefix.
+- `xtdId` — `1` for an extended 29-bit ID, `0` for a standard 11-bit ID.
+- `canFd` — `1` for a CAN FD frame, `0` for classic CAN 2.0.
+- `timestampUs` — device uptime in microseconds when the frame was drained from the controller, as a 32-bit value (wraps every ~71 minutes).
+- `dlc` — payload length in bytes (`0`–`64`).
+- `data` — the payload bytes in hex (`dlc` of them), space-separated.
+
+### Wire layout
+
+```
+v 0
+1 3 0 123 0 0 4821000 4 DE AD BE EF   # a frame: 3 more queued, none dropped, ID 0x123, classic, 4 bytes
+0 0 0 0 0 0 0 0                        # empty queue (dropped may be non-zero, e.g. 0 0 17 0 0 0 0 0)
+```
+
+### Notes
+
+- The queue is enabled automatically on the first call, so no `Enable CAN(FD) Receive Queue` (`e`) call is needed unless you want to pre-arm it before traffic starts or to turn it off again.
+- The command services the controller's receive FIFO itself before popping, so it keeps working from a caller that blocks the main loop (a running rthon or WASM script). It honours the same per-channel Neptune mode gate as the main loop. Frames drained by that in-command service are not echoed as `[*can0 ...]` text events (the echo would land in the command's own response); they still reach the binary stream and the panel table. In the normal cooperative case the main loop has already drained them, echo included, and this service finds nothing new.
+- Depth is 32 frames; when full the oldest frame is dropped and `dropped` counts it. Poll faster, or use a hardware filter (`f`), if `dropped` keeps growing.
+- Independent of the host stream (`o`); both may be on at once.
+- `Failed` is returned if the queue could not be enabled (PSRAM unavailable); `Invalid` if `channel` did not parse.
+- Requires power zone 15 (the CAN transceiver zone).
+
+### From a script on the device
+
+rthon returns the fields as one list, the data bytes expanded one element each: `[frame, queued, dropped, arbId, xtdId, canFd, timestampUs, dlc, b0, b1, ...]`:
+
+```
+f = dev.io.canfd.receive_canfd(0)
+if f[0] == 1:
+    for i in range(f[7]):
+        b = f[8 + i]
+```
+
+WASM decodes the fields into typed outputs, the byte array last:
+
+```
+ow_io_canfd_receive_canfd(dev, 0, &frame, &queued, &dropped, &arb_id, &xtd_id, &can_fd,
+                          &timestamp_us, &dlc, data, sizeof data, &data_len);
+```
+
+        Enter Channel
+
+        Args:
+            channel: channel (decS32).
+
+        Returns:
+            Result: Ok(frame: bool, queued: int, dropped: int, arb_id: int, xtd_id: int, can_fd: int, timestamp_us: int, dlc: int, data: bytes | bytearray) or Err(message).
+        """
+        return self._call("v", [encoding.enc_int(channel)], ["bool", "int", "int", "hex", "int", "int", "int", "int", "bytes"])

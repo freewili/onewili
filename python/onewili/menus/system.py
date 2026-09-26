@@ -74,12 +74,12 @@ class System(MenuBase):
 
         Wire: ``h\a\g``
 
-        Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id). More space-separated fields may be appended later.
+        Report the device state for host sync: SD card host (none|main|usb), event host-streaming gate (0|1), active-stream mask (hex, bit index = event id), clk_sys in Hz. More space-separated fields may be appended later.
 
         Returns:
-            Result: Ok(sd: str, hoststream: bool, activemask: str) or Err(message).
+            Result: Ok(sd: str, hoststream: bool, activemask: str, clksyshz: int) or Err(message).
         """
-        return self._call("g", [], ["str", "bool", "str"])
+        return self._call("g", [], ["str", "bool", "str", "int"])
 
     def event_host_streaming(self, enable: int) -> Result:
         r"""Event Host Streaming.

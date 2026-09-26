@@ -11,6 +11,19 @@ Events: `ow_binary_poll` (binary/FTDI WILI frames, see
 `include/onewili_events.h` for the typed structs) and
 `ow_poll_text_event` (text `[*id ...]` frames). Poll-based, no threads.
 
+For arbitrary message types use `ow_binary_poll_raw`, which returns the
+header type, repeat count, error flag and all payload bytes. Raw and typed
+polls consume the same stream. Returned payload/sample pointers remain valid
+until the next poll. Copy them to retain a capture.
+
+`ow_binary_open` uses a 4096-byte inline buffer. For logic-analyzer captures,
+allocate `OW_BIN_CAPTURE_CAPACITY` bytes and call `ow_binary_open_buffer`.
+The caller owns that buffer through close; the API performs no allocation.
+Typed logic-analyzer events include `sample_data`/`sample_bytes`: little-endian
+digital words in ring order, then a 2048-byte analog buffer when enabled.
+Digital head/trigger indices are words; analog indices are samples. CAN FD
+events retain both controller headers and all sixteen data words.
+
 ## Build
 
 ```

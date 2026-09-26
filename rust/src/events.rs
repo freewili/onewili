@@ -42,6 +42,7 @@ pub struct LogicAnalyzerReportEvent {
     pub analog_buffer_head: u32,   // uiAnalogBufferHead @ 36
     pub analog_trigger_location: u32,   // uiAnalogTriggerLocation @ 40
     pub error: bool,   // frame header error bit
+    pub sample_data: Vec<u8>, // digital then analog bytes, ring order
 }
 
 /// Any event the device can deliver via `OneWili::poll_event`.
@@ -95,9 +96,10 @@ pub fn decode(header_type: u16, payload: &[u8], error: bool) -> Option<Event> {
             }))
         }
         2 => {
-            if payload.len() != 44 {
+            if payload.len() < 44 {
                 return None;
             }
+            if (payload.len() - 44) % 4 != 0 { return None; }
             Some(Event::LogicAnalyzerReport(LogicAnalyzerReportEvent {
                 trigger_time_stamp_ns: u64::from_le_bytes(payload[0..8].try_into().unwrap()),
                 sample_rate_ns: u32::from_le_bytes(payload[8..12].try_into().unwrap()),
@@ -115,9 +117,29 @@ pub fn decode(header_type: u16, payload: &[u8], error: bool) -> Option<Event> {
                 analog_sample_count: u32::from_le_bytes(payload[32..36].try_into().unwrap()),
                 analog_buffer_head: u32::from_le_bytes(payload[36..40].try_into().unwrap()),
                 analog_trigger_location: u32::from_le_bytes(payload[40..44].try_into().unwrap()),
+                sample_data: payload[44..].to_vec(),
                 error,
             }))
         }
         _ => Some(Event::Unknown { header_type, len: payload.len() }),
+    }
+}
+
+#[cfg(test)]
+mod logic_analyzer_report_tests {
+    use super::*;
+    #[test]
+    fn variable_samples_and_malformed_tail() {
+        let mut payload = vec![0u8; 44];
+        payload.extend_from_slice(&[0, 0xff, 0x57, 0x49]);
+        match decode(2, &payload, true).unwrap() {
+            Event::LogicAnalyzerReport(event) => {
+                assert_eq!(event.sample_data, vec![0, 0xff, 0x57, 0x49]);
+                assert!(event.error);
+            },
+            _ => panic!("wrong event"),
+        }
+        payload.push(1);
+        assert!(decode(2, &payload, false).is_none());
     }
 }

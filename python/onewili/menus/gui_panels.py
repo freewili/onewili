@@ -70,3 +70,37 @@ class GUIPanels(MenuBase):
             Result: Ok(None) or Err(message).
         """
         return self._call("c", [encoding.enc_int(index)], [])
+
+    def set_menu_text(self, button: int, text: str) -> Result:
+        r"""Set Menu Text.
+
+        Wire: ``g\c\f``
+
+        Sets a custom panel menu button label (up to 15 bytes).
+
+        Create the custom panel with ShowMenu enabled first. Button order is gray=0, yellow=1, green=2, blue=3, red=4. Labels do not assign actions; poll Read Buttons to handle presses.
+
+        Enter button (0 gray, 1 yellow, 2 green, 3 blue, 4 red), label
+
+        Args:
+            button: button (decS32).
+            text: text (string).
+
+        Returns:
+            Result: Ok(None) or Err(message).
+        """
+        return self._call("f", [encoding.enc_int(button), encoding.enc_str(text)], [])
+
+    def read_buttons(self) -> Result:
+        r"""Read Buttons.
+
+        Wire: ``g\c\e``
+
+        Returns and clears the panel and keypad button press bitmask.
+
+        Bits 0 through 4 represent gray, yellow, green, blue, and red. Keypad bits are Up=5, Down=6, Left=7, Right=8, Center=9, OK=10, X/Cancel=11, Home=12, Page=13. These are bit positions, not GUI event IDs (keypad event IDs 33 through 41 map to bits 5 through 13). Presses are latched until read, so short taps between polls are retained. Repeated presses of one button coalesce. Release and long-press events are ignored. Creating a custom panel clears the latch. This latch is shared by all API clients; use one polling consumer. Existing GUI event handling continues normally.
+
+        Returns:
+            Result: Ok(pressed: int) or Err(message).
+        """
+        return self._call("e", [], ["hex"])

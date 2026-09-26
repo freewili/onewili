@@ -121,6 +121,75 @@ impl<'a> FileSystem<'a> {
         self.t.call(&cmd)?;
         Ok(())
     }
+
+    /// Begin File Read. Open an SD file for bounded framed reads. Paths are UTF-8 encoded as compact hex and must be absolute; the session expires after 30 seconds of inactivity.. Wire: `h\x\0`
+    pub fn begin_file_read(&mut self, session: u32, path_hex: &str) -> Result<i32, OwError> {
+        let mut cmd = String::from("h\\x\\0");
+        encoding::push_hex(&mut cmd, session as u64, 8);
+        encoding::push_str(&mut cmd, path_hex);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let size = encoding::tok_int(&mut toks)? as i32;
+        Ok(size)
+    }
+
+    /// Begin File Write. Stage an upload beside its destination. Existing files are preserved until size and CRC32 validation succeeds. No raw USB mode is entered.. Wire: `h\x\1`
+    pub fn begin_file_write(&mut self, session: u32, path_hex: &str, size: i32, crc32: u32, overwrite: bool) -> Result<i32, OwError> {
+        let mut cmd = String::from("h\\x\\1");
+        encoding::push_hex(&mut cmd, session as u64, 8);
+        encoding::push_str(&mut cmd, path_hex);
+        encoding::push_int(&mut cmd, size as i64);
+        encoding::push_hex(&mut cmd, crc32 as u64, 8);
+        encoding::push_bool(&mut cmd, overwrite);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let size = encoding::tok_int(&mut toks)? as i32;
+        Ok(size)
+    }
+
+    /// Read File Chunk. Read the next 1 to 192 bytes as compact hex. Use the exact sequential offset; a dash means an empty file or EOF.. Wire: `h\x\2`
+    pub fn read_file_chunk(&mut self, session: u32, offset: i32, maximum: i32) -> Result<(i32, String), OwError> {
+        let mut cmd = String::from("h\\x\\2");
+        encoding::push_hex(&mut cmd, session as u64, 8);
+        encoding::push_int(&mut cmd, offset as i64);
+        encoding::push_int(&mut cmd, maximum as i64);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let count = encoding::tok_int(&mut toks)? as i32;
+        let data = encoding::rest_str(&mut toks);
+        Ok((count, data))
+    }
+
+    /// Write File Chunk. Write the next 1 to 192 hex-encoded bytes. Duplicate or out-of-order chunks are rejected; never replay an ambiguous timeout.. Wire: `h\x\3`
+    pub fn write_file_chunk(&mut self, session: u32, offset: i32, data: &str) -> Result<i32, OwError> {
+        let mut cmd = String::from("h\\x\\3");
+        encoding::push_hex(&mut cmd, session as u64, 8);
+        encoding::push_int(&mut cmd, offset as i64);
+        encoding::push_str(&mut cmd, data);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let position = encoding::tok_int(&mut toks)? as i32;
+        Ok(position)
+    }
+
+    /// Finish File Transfer. Verify the byte count, close the file and return CRC32. A complete verified upload is published; an incomplete or corrupt upload never replaces the destination.. Wire: `h\x\4`
+    pub fn finish_file_transfer(&mut self, session: u32) -> Result<(i32, u32), OwError> {
+        let mut cmd = String::from("h\\x\\4");
+        encoding::push_hex(&mut cmd, session as u64, 8);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let size = encoding::tok_int(&mut toks)? as i32;
+        let crc32 = encoding::tok_hex(&mut toks)? as u32;
+        Ok((size, crc32))
+    }
+
+    /// Cancel File Transfer. Close the matching transfer and remove its incomplete staging file. Other shell and menu sessions remain available.. Wire: `h\x\5`
+    pub fn cancel_file_transfer(&mut self, session: u32) -> Result<(), OwError> {
+        let mut cmd = String::from("h\\x\\5");
+        encoding::push_hex(&mut cmd, session as u64, 8);
+        self.t.call(&cmd)?;
+        Ok(())
+    }
 }
 
 /// Spontaneous event frames this menu emits:

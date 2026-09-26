@@ -5,7 +5,7 @@
 //! errorbit<<31|payload_len (LE u32) + payload bytes.
 
 pub const HEADER_SIZE: usize = 12;
-pub const MAX_PAYLOAD: usize = 1 << 20;
+pub const MAX_PAYLOAD: usize = (1 << 20) + 2048 + 44;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawFrame {
@@ -142,5 +142,18 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(got[0].error);
         assert_eq!(got[0].payload.len(), 2);
+    }
+
+    #[test]
+    fn maximum_capture_and_unknown_frame_preserve_payload() {
+        let mut p = Parser::new();
+        let payload = vec![0xaa; MAX_PAYLOAD];
+        let wire = frame(65535, &payload, true);
+        let mut got = Vec::new();
+        for part in wire.chunks(509) { got.extend(p.feed(part)); }
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].header_type, 65535);
+        assert_eq!(got[0].payload, payload);
+        assert!(got[0].error);
     }
 }
