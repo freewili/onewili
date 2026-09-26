@@ -100,9 +100,8 @@ Command IDs are stable and append-only: a command keeps its numeric ID for
 life, and new commands are appended. Code compiled against an older release
 keeps working against newer firmware.
 
-The few deliberate hand-written additions carry a `LOCAL ADDITION` comment and
-are re-applied after each sync — grep for that tag before and after
-regenerating.
+Root documentation, CI, regression tests and some Python examples are maintained
+here. Preserve them when syncing generated output. See [AGENTS.md](AGENTS.md).
 
 ## Support
 
