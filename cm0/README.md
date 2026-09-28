@@ -73,6 +73,20 @@ locally too, so a failed download leaves an existing destination intact.
 Directory listing via `dev.files.list()` and binary event streaming still require
 the USB transport; this addition supports file upload and download over CM0.
 
+## Peer streams
+
+`onewili_stream.h` (`ow_stream_write`, `ow_stream_poll`, `ow_stream_drops`)
+passes best-effort datagrams of 1-128 bytes between OneWili clients -- the
+CM0, the display CPU, the ESP32 and the PC host -- routed by MAIN, with the
+same meaning as on every other target. The mailbox cannot be pushed to, so
+here the calls ride MAIN's stream menu commands: MAIN queues datagrams for
+the CM0 (a small queue; overflow is dropped and counted), and one
+`ow_stream_poll` round trip fetches up to 1 KB of them, served one datagram
+per call. Pass a buffer of `OW_STREAM_MTU` bytes. The CMake target defines
+`OW_STREAM_STASH=1024` publicly because it sizes a buffer inside `ow_device`;
+build any code that declares an `ow_device` with the same value. From Python,
+use `dev.streams` (`write`, `poll`, `drops`).
+
 The CM0's SRAM/PSRAM router is NOT part of this menu API. It is a local,
 non-menu capability reached directly through `fwcm0::SramRouter`
 (status/read/write/request_swap), analogous to the hand-written file-I/O

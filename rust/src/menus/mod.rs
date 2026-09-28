@@ -12,6 +12,7 @@ pub mod i2c_settings;
 pub mod spi;
 pub mod spi_settings;
 pub mod canfd;
+pub mod isotp;
 pub mod analog_in;
 pub mod analog_out;
 pub mod logic_player;

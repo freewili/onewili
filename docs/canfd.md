@@ -705,3 +705,7 @@ if (ow_binary_poll(&bdev, &ev) == 1 && ev.kind == OW_EV_CAN_RX_REPORT)
 ```rust
 if let Some(onewili::Event::CanRxReport(e)) = dev.poll_event()? { /* e.<field> */ }
 ```
+
+## Sub-menus
+
+- [ISO-TP Transport](isotp.md) - `dev.io.canfd.isotp`

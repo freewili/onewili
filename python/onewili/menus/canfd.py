@@ -6,6 +6,7 @@ from result import Result
 from .. import encoding
 from ..menubase import MenuBase
 from ..transport import Transport
+from .isotp import ISOTP
 
 
 class CANFD(MenuBase):
@@ -20,6 +21,10 @@ class CANFD(MenuBase):
         "canTx1": {"binary": False, "payload": [("arb_id", "string"), ("data_bytes", "hexbytes")], "description": "CAN TX echo on channel 1 (hex arb id, 'x' suffix = extended, then hex data)"},
         "canRxReport": {"binary": True, "header_type": 1, "payload": [("time_stamp_ns", "hexU64"), ("gpio_bitfield", "hexU32"), ("can_id", "hexU32"), ("header_bits", "hexU32"), ("data_words", "hexbytes")], "description": "CAN RX frame report (binary API, MCP2518 memory-map layout)"},
     }
+
+    def __init__(self, transport: Transport, nav_path: str) -> None:
+        super().__init__(transport, nav_path)
+        self.isotp = ISOTP(transport, nav_path + "\\t")
 
     def enable_canfd_stream(self, channel: int, enabled: int) -> Result:
         r"""Stream CAN(FD).

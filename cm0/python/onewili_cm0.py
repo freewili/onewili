@@ -19,6 +19,10 @@ class Cm0Transport:
     """
 
     framed_files = True
+    # onewili.streams batch size: a mailbox reply holds about 4 KB, and MAIN
+    # runs one CM0 command per loop pass, so fetch 1 KB of datagrams per poll
+    # (the C package's OW_STREAM_STASH).
+    stream_poll_bytes = 1024
 
     def __init__(self, fwcm0: str = "fwcm0", timeout: float = 3.0) -> None:
         self._argv = [fwcm0, "api"]

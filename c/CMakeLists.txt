@@ -8,7 +8,8 @@ add_library(onewili STATIC
     src/onewili_events.c
     src/binary_framing.c
     src/binary_transport.c
-    src/onewili_files.c)
+    src/onewili_files.c
+    src/onewili_stream.c)
 target_include_directories(onewili PUBLIC include)
 
 option(ONEWILI_EXAMPLES "Build the examples" ON)

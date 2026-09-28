@@ -97,3 +97,81 @@ class System(MenuBase):
             Result: Ok(enabled: bool) or Err(message).
         """
         return self._call("e", [encoding.enc_int(enable)], ["bool"])
+
+    def stream_write(self, dst: int, data: bytes | bytearray) -> Result:
+        r"""Stream Write.
+
+        Wire: ``h\a\w``
+
+        Sends one peer-stream datagram (1-128 bytes) to another OneWili client through MAIN. Best effort: a datagram the destination cannot take now is dropped and counted, never queued behind.
+
+        # Stream Write
+
+Sends one peer-stream datagram to another OneWili client (DISPLAY, ESP32, CM0 or the PC host). MAIN routes it and stamps the sender as the client that issued this command.
+
+- `dst` is the destination peer: 0 main (reserved, always dropped), 1 display, 2 esp32, 3 cm0, 4 host.
+- `data` is 1-128 bytes. Longer datagrams are rejected, never split.
+- `delivered` is 1 when the datagram left MAIN for the destination (or was queued for a polling client), 0 when it was dropped: the destination is not using streams right now, its link had no room, or its queue is full.
+
+This is the text route of `ow_stream_write`; the DISPLAY and ESP32 have faster push links for the same datagrams. See also `p` (Stream Poll) and `c` (Stream Status).
+
+        Enter destination peer (0 main, 1 display, 2 esp32, 3 cm0, 4 host) followed by 1-128 data bytes (hex, space separated)
+
+        Args:
+            dst: dst (decS32).
+            data: data (hexbytes).
+
+        Returns:
+            Result: Ok(delivered: bool) or Err(message).
+        """
+        return self._call("w", [encoding.enc_int(dst), encoding.enc_bytes(data)], ["bool"])
+
+    def stream_poll(self, max: int) -> Result:
+        r"""Stream Poll.
+
+        Wire: ``h\a\p``
+
+        Pops peer-stream datagrams queued for the calling client: frames popped, frames still queued, frames dropped for this client so far, then the datagrams packed as [src][len][bytes] records.
+
+        # Stream Poll
+
+Pops the datagrams MAIN has queued for the calling client, oldest first, as many whole ones as fit in `max` bytes.
+
+- `frames` is how many were popped (0 when none are waiting).
+- `queued` is how many are still waiting.
+- `dropped` is how many datagrams addressed to this client were dropped so far (queue full), free-running.
+- `data` packs the popped datagrams as records: source peer (1 byte), length (1 byte), then that many bytes.
+
+Only clients without a push link (the PC host and the CM0) have a queue; for the DISPLAY and ESP32 the datagrams are pushed on their own links and this returns none. This is the text route of `ow_stream_poll`. See also `w` (Stream Write) and `c` (Stream Status).
+
+        Enter the most bytes of packed records to return (at least 130)
+
+        Args:
+            max: max (decS32).
+
+        Returns:
+            Result: Ok(frames: int, queued: int, dropped: int, data: bytes | bytearray) or Err(message).
+        """
+        return self._call("p", [encoding.enc_int(max)], ["int", "int", "int", "bytes"])
+
+    def stream_status(self) -> Result:
+        r"""Stream Status.
+
+        Wire: ``h\a\c``
+
+        Peer-stream state for the calling client: the datagram MTU, datagrams waiting in its queue, datagrams addressed to it that MAIN dropped, and datagrams it sent that MAIN dropped.
+
+        # Stream Status
+
+Reports the peer-stream counters MAIN keeps for the client that issues it.
+
+- `mtu` is the largest datagram in bytes, the same on every link.
+- `queued` is how many datagrams wait in this client's queue (always 0 for push-link clients).
+- `droppedto` counts datagrams addressed to this client that MAIN dropped; `droppedfrom` counts datagrams this client sent that MAIN dropped. Both are free-running since MAIN booted.
+
+`ow_stream_drops` on a text client is their sum. See also `w` (Stream Write) and `p` (Stream Poll).
+
+        Returns:
+            Result: Ok(mtu: int, queued: int, droppedto: int, droppedfrom: int) or Err(message).
+        """
+        return self._call("c", [], ["int", "int", "int", "int"])

@@ -9,6 +9,12 @@ add_library(onewili_cm0 STATIC
     src/onewili_events.c
     src/binary_framing.c
     src/binary_transport.c
+    src/onewili_stream.c
     src/onewili_cm0.cpp)
 target_include_directories(onewili_cm0 PUBLIC include)
 target_link_libraries(onewili_cm0 PUBLIC fwcm0::fwcm0_core)
+# Peer-stream polls fetch this many bytes of datagrams per mailbox round trip
+# (a reply can be about 4 KB, and MAIN runs one CM0 command per loop pass).
+# It sizes a buffer inside ow_device, so it is PUBLIC: the library and every
+# program using it must agree on the struct layout.
+target_compile_definitions(onewili_cm0 PUBLIC OW_STREAM_STASH=1024)

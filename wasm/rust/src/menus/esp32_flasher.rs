@@ -12,7 +12,7 @@ pub struct Esp32Flasher<'a> {
 }
 
 impl<'a> Esp32Flasher<'a> {
-    /// Connect To Bootloader. Instruct the ESP32 to enter into bootloader. Wire: `w\a\b`
+    /// Connect To Bootloader. Opens a ROM-loader session: resets the ESP32 into its bootloader and loads the flasher stub. Wire: `w\a\b`
     pub fn enter_bootloader(&mut self, upgrade_transmission_rate: i32) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();
         a.i32(upgrade_transmission_rate);
@@ -20,42 +20,42 @@ impl<'a> Esp32Flasher<'a> {
         Ok(())
     }
 
-    /// Reset. Instruct the ESP32 to enter into application. Wire: `w\a\r`
+    /// Reset. Closes any loader session and resets the ESP32 into its application. Wire: `w\a\r`
     pub fn enter_application(&mut self) -> Result<(), OwError> {
         let a = crate::transport::Args::new();
         let _r = crate::transport::call(313 /* CMD_WIRELESS_ESP32_FLASHER_ENTER_APPLICATION */, &a)?;
         Ok(())
     }
 
-    /// Read Chip ID And Security Info. Toggle ESP32's Enable Pin. Wire: `w\a\i`
-    pub fn get_i_dand_security(&mut self) -> Result<(i32, i32, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool), OwError> {
+    /// Read Chip ID And Security Info. Reads the ESP32's chip ID, ECO version and security flags. Wire: `w\a\i`
+    pub fn get_i_dand_security(&mut self) -> Result<(i32, i32, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool), OwError> {
         let a = crate::transport::Args::new();
         let mut _r = crate::transport::call(314 /* CMD_WIRELESS_ESP32_FLASHER_GET_I_DAND_SECURITY */, &a)?;
-        Ok((_r.i32(), _r.i32(), _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0))
+        Ok((_r.i32(), _r.i32(), _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0, _r.u8() != 0))
     }
 
-    /// Read Flash Size. Toggle ESP32's Enable Pin. Wire: `w\a\k`
+    /// Read Flash Size. Detects the ESP32's flash size in bytes. Wire: `w\a\k`
     pub fn read_flash_size(&mut self) -> Result<i32, OwError> {
         let a = crate::transport::Args::new();
         let mut _r = crate::transport::call(315 /* CMD_WIRELESS_ESP32_FLASHER_READ_FLASH_SIZE */, &a)?;
         Ok(_r.i32())
     }
 
-    /// Read MAC. Returns MAC of esp32. Wire: `w\a\m`
+    /// Read MAC. Reads the ESP32's factory MAC address. Wire: `w\a\m`
     pub fn read_esp32mac(&mut self) -> Result<String, OwError> {
         let a = crate::transport::Args::new();
         let mut _r = crate::transport::call(316 /* CMD_WIRELESS_ESP32_FLASHER_READ_ESP32MAC */, &a)?;
         Ok(_r.string())
     }
 
-    /// Erase All Flash. Toggle ESP32's Enable Pin. Wire: `w\a\e`
+    /// Erase All Flash. Erases the ESP32's entire flash. Needs an open loader session. Wire: `w\a\e`
     pub fn erase_all_flash(&mut self) -> Result<(), OwError> {
         let a = crate::transport::Args::new();
         let _r = crate::transport::call(317 /* CMD_WIRELESS_ESP32_FLASHER_ERASE_ALL_FLASH */, &a)?;
         Ok(())
     }
 
-    /// Start Writing Flash Operations. Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes. Wire: `w\a\f`
+    /// Start Writing Flash Operations. Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes; each Write Flash sends one block. Wire: `w\a\f`
     pub fn start_flash_operations(&mut self, offset: u32, size: i32, block_size: i32) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();
         a.u32(offset);
@@ -65,7 +65,7 @@ impl<'a> Esp32Flasher<'a> {
         Ok(())
     }
 
-    /// Finish Flash Writing Operations. Ends ESP32 Flashing Operations.. Wire: `w\a\p`
+    /// Finish Flash Writing Operations. Ends ESP32 flashing; reboot=1 also closes the session and starts the new image. Wire: `w\a\p`
     pub fn stop_flash_operation(&mut self, reboot: bool) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();
         a.u8(if reboot { 1 } else { 0 });
@@ -73,7 +73,7 @@ impl<'a> Esp32Flasher<'a> {
         Ok(())
     }
 
-    /// Write Flash. Writes Binary Blob into flash. Wire: `w\a\o`
+    /// Write Flash. Writes one block (up to the block size given to f) into flash. Wire: `w\a\o`
     pub fn flash_write(&mut self, flash_data: &[u8]) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();
         a.bytes(flash_data);
@@ -81,36 +81,34 @@ impl<'a> Esp32Flasher<'a> {
         Ok(())
     }
 
-    /// Read Flash. Reads binary blob from flash with given address and size.. Wire: `w\a\j`
-    pub fn flash_read(&mut self, offset: u32, size: i32) -> Result<(), OwError> {
+    /// Read Flash. Reads up to 128 bytes of ESP32 flash at the given address. Wire: `w\a\j`
+    pub fn flash_read(&mut self, offset: u32, size: i32) -> Result<Vec<u8>, OwError> {
         let mut a = crate::transport::Args::new();
         a.u32(offset);
         a.i32(size);
-        let _r = crate::transport::call(321 /* CMD_WIRELESS_ESP32_FLASHER_FLASH_READ */, &a)?;
-        Ok(())
+        let mut _r = crate::transport::call(321 /* CMD_WIRELESS_ESP32_FLASHER_FLASH_READ */, &a)?;
+        Ok(_r.bytes())
     }
 
-    /// Start Memory Write Operations. Perpares memeory write operations on the esp32. Max Block Size size is 128. Wire: `w\a\y`
-    pub fn start_write_memory_operations(&mut self, offset: u32, memory_block: u32, block_size: i32) -> Result<(), OwError> {
+    /// Start Memory Write Operations. Prepares a RAM load on the ESP32. Block size can be up to 128 bytes. Wire: `w\a\y`
+    pub fn start_write_memory_operations(&mut self, offset: u32, size: i32, block_size: i32) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();
         a.u32(offset);
-        a.u32(memory_block);
+        a.i32(size);
         a.i32(block_size);
         let _r = crate::transport::call(322 /* CMD_WIRELESS_ESP32_FLASHER_START_WRITE_MEMORY_OPERATIONS */, &a)?;
         Ok(())
     }
 
-    /// Write Memory. Perpares memeory write operations on the esp32. Max Block Size size is 128. Wire: `w\a\0`
-    pub fn memory_write(&mut self, offset: u32, memory_block: u32, block_size: i32) -> Result<(), OwError> {
+    /// Write Memory. Writes one block (up to the block size given to y) into ESP32 RAM. Wire: `w\a\0`
+    pub fn memory_write(&mut self, data: &[u8]) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();
-        a.u32(offset);
-        a.u32(memory_block);
-        a.i32(block_size);
+        a.bytes(data);
         let _r = crate::transport::call(323 /* CMD_WIRELESS_ESP32_FLASHER_MEMORY_WRITE */, &a)?;
         Ok(())
     }
 
-    /// Stop Memory Write Operations. Disables memory write operations on esp32 and sets entry point in ram. Wire: `w\a\t`
+    /// Stop Memory Write Operations. Ends a RAM load; a non-zero entry point starts the loaded code and closes the session. Wire: `w\a\t`
     pub fn stop_memory_operation(&mut self, entry_address: u32) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();
         a.u32(entry_address);
@@ -135,7 +133,7 @@ impl<'a> Esp32Flasher<'a> {
         Ok(_r.u32())
     }
 
-    /// Flash Default App. Flash default application onto ESP32. Wire: `w\a\n`
+    /// Flash Default App. Not available on FW2: there is no built-in image. Use Flash From Folder. Wire: `w\a\n`
     pub fn flash_default(&mut self) -> Result<(), OwError> {
         let a = crate::transport::Args::new();
         let _r = crate::transport::call(327 /* CMD_WIRELESS_ESP32_FLASHER_FLASH_DEFAULT */, &a)?;

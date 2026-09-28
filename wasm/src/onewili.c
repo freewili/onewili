@@ -3624,7 +3624,7 @@ ow_status ow_wireless_esp32_flasher_enter_application(ow_device* dev)
     return OW_OK;
 }
 
-ow_status ow_wireless_esp32_flasher_get_i_dand_security(ow_device* dev, int32_t* esp_chip_id, int32_t* version, bool* sb_en, bool* sbar_en, bool* sdm_en, bool* sbrk_1, bool* sbrk_2, bool* sbrk_3, bool* jtag_sw_dis, bool* jtag_hw_dis, bool* flash_enc_en, bool* dcache_dis, bool* icache_dis)
+ow_status ow_wireless_esp32_flasher_get_i_dand_security(ow_device* dev, int32_t* esp_chip_id, int32_t* version, bool* sb_en, bool* sbar_en, bool* sdm_en, bool* sbrk_1, bool* sbrk_2, bool* sbrk_3, bool* jtag_sw_dis, bool* jtag_hw_dis, bool* usb_dis, bool* flash_enc_en, bool* dcache_dis, bool* icache_dis)
 {
     (void)dev;
     uint8_t args[512]; int ao = 0;
@@ -3642,6 +3642,7 @@ ow_status ow_wireless_esp32_flasher_get_i_dand_security(ow_device* dev, int32_t*
     if (sbrk_3) *sbrk_3 = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     if (jtag_sw_dis) *jtag_sw_dis = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     if (jtag_hw_dis) *jtag_hw_dis = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
+    if (usb_dis) *usb_dis = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     if (flash_enc_en) *flash_enc_en = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     if (dcache_dis) *dcache_dis = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
     if (icache_dis) *icache_dis = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
@@ -3717,7 +3718,7 @@ ow_status ow_wireless_esp32_flasher_flash_write(ow_device* dev, const uint8_t* f
     return OW_OK;
 }
 
-ow_status ow_wireless_esp32_flasher_flash_read(ow_device* dev, uint32_t offset, int32_t size)
+ow_status ow_wireless_esp32_flasher_flash_read(ow_device* dev, uint32_t offset, int32_t size, uint8_t* data, size_t data_cap, size_t* data_len)
 {
     (void)dev;
     uint8_t args[512]; int ao = 0;
@@ -3726,15 +3727,17 @@ ow_status ow_wireless_esp32_flasher_flash_read(ow_device* dev, uint32_t offset, 
     uint8_t ret[512]; int rc;
     rc = ow_call(CMD_WIRELESS_ESP32_FLASHER_FLASH_READ, args, ao, ret, (int)sizeof ret);
     if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    ow__take_bytes(ret, &ro, data, (int)data_cap, (int*)data_len);
     return OW_OK;
 }
 
-ow_status ow_wireless_esp32_flasher_start_write_memory_operations(ow_device* dev, uint32_t offset, uint32_t memory_block, int32_t block_size)
+ow_status ow_wireless_esp32_flasher_start_write_memory_operations(ow_device* dev, uint32_t offset, int32_t size, int32_t block_size)
 {
     (void)dev;
     uint8_t args[512]; int ao = 0;
     ao = ow__pack_u32(args, ao, offset);
-    ao = ow__pack_u32(args, ao, memory_block);
+    ao = ow__pack_i32(args, ao, size);
     ao = ow__pack_i32(args, ao, block_size);
     uint8_t ret[512]; int rc;
     rc = ow_call(CMD_WIRELESS_ESP32_FLASHER_START_WRITE_MEMORY_OPERATIONS, args, ao, ret, (int)sizeof ret);
@@ -3742,13 +3745,11 @@ ow_status ow_wireless_esp32_flasher_start_write_memory_operations(ow_device* dev
     return OW_OK;
 }
 
-ow_status ow_wireless_esp32_flasher_memory_write(ow_device* dev, uint32_t offset, uint32_t memory_block, int32_t block_size)
+ow_status ow_wireless_esp32_flasher_memory_write(ow_device* dev, const uint8_t* data, size_t data_len)
 {
     (void)dev;
     uint8_t args[512]; int ao = 0;
-    ao = ow__pack_u32(args, ao, offset);
-    ao = ow__pack_u32(args, ao, memory_block);
-    ao = ow__pack_i32(args, ao, block_size);
+    ao = ow__pack_bytes(args, ao, data, (uint32_t)data_len);
     uint8_t ret[512]; int rc;
     rc = ow_call(CMD_WIRELESS_ESP32_FLASHER_MEMORY_WRITE, args, ao, ret, (int)sizeof ret);
     if (rc < 0) return OW_ERR_FAILED;
@@ -7072,6 +7073,207 @@ ow_status ow_linux_cm0_usb_mode(ow_device* dev, const char* mode, char* mode_out
     int ro = 0;
     ow__take_str(ret, &ro, mode_out, (int)mode_out_cap);
     if (switchable) *switchable = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_enable(ow_device* dev, bool enable)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u8(args, ao, enable ? 1 : 0);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_ENABLE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_configure_addressing(ow_device* dev, uint32_t tx_id, uint32_t rx_id, bool extended_id, bool can_fd, int32_t tx_data_length, bool padding, uint32_t pad_byte, int32_t addressing_mode, uint32_t ext_address)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_u32(args, ao, tx_id);
+    ao = ow__pack_u32(args, ao, rx_id);
+    ao = ow__pack_u8(args, ao, extended_id ? 1 : 0);
+    ao = ow__pack_u8(args, ao, can_fd ? 1 : 0);
+    ao = ow__pack_i32(args, ao, tx_data_length);
+    ao = ow__pack_u8(args, ao, padding ? 1 : 0);
+    ao = ow__pack_u32(args, ao, pad_byte);
+    ao = ow__pack_i32(args, ao, addressing_mode);
+    ao = ow__pack_u32(args, ao, ext_address);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_CONFIGURE_ADDRESSING, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_configure_flow_control(ow_device* dev, int32_t block_size, uint32_t st_min, int32_t wft_max)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, block_size);
+    ao = ow__pack_u32(args, ao, st_min);
+    ao = ow__pack_i32(args, ao, wft_max);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_CONFIGURE_FLOW_CONTROL, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_set_st_min_trim(ow_device* dev, int32_t st_min_trim_us, int32_t st_min_override_us)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, st_min_trim_us);
+    ao = ow__pack_i32(args, ao, st_min_override_us);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_SET_ST_MIN_TRIM, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_send_message(ow_device* dev, const uint8_t* data, size_t data_len, int32_t* result, int32_t* bytes, int32_t* frames, int32_t* duration_us, int32_t* min_gap_us, int32_t* max_gap_us, int32_t* avg_gap_us)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_bytes(args, ao, data, (uint32_t)data_len);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_SEND_MESSAGE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (result) *result = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (bytes) *bytes = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (frames) *frames = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (duration_us) *duration_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (min_gap_us) *min_gap_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (max_gap_us) *max_gap_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (avg_gap_us) *avg_gap_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_send_file(ow_device* dev, const char* file_path, int32_t* result, int32_t* bytes, int32_t* frames, int32_t* duration_us, int32_t* min_gap_us, int32_t* max_gap_us, int32_t* avg_gap_us)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, file_path);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_SEND_FILE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (result) *result = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (bytes) *bytes = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (frames) *frames = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (duration_us) *duration_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (min_gap_us) *min_gap_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (max_gap_us) *max_gap_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (avg_gap_us) *avg_gap_us = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_receive_message(ow_device* dev, int32_t* status, int32_t* length, int32_t* in_file, uint8_t* data, size_t data_cap, size_t* data_len)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_RECEIVE_MESSAGE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (status) *status = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (length) *length = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (in_file) *in_file = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    ow__take_bytes(ret, &ro, data, (int)data_cap, (int*)data_len);
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_set_receive_file_path(ow_device* dev, const char* file_path)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_str(args, ao, file_path);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_SET_RECEIVE_FILE_PATH, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_abort(ow_device* dev)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_ABORT, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_io_canfd_isotp_iso_tp_show_status(ow_device* dev, int32_t* state, int32_t* last_result, int32_t* rx_count, int32_t* tx_count, int32_t* errors)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_IO_CANFD_ISOTP_ISO_TP_SHOW_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (state) *state = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (last_result) *last_result = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (rx_count) *rx_count = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (tx_count) *tx_count = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (errors) *errors = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_wireless_e_sp32_mode(ow_device* dev, int32_t value)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, value);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_WIRELESS_E_SP32_MODE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    return OW_OK;
+}
+
+ow_status ow_hardware_system_stream_write(ow_device* dev, int32_t dst, const uint8_t* data, size_t data_len, bool* delivered)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, dst);
+    ao = ow__pack_bytes(args, ao, data, (uint32_t)data_len);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_SYSTEM_STREAM_WRITE, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (delivered) *delivered = ow__take_u8(ret, &ro) != 0; else ow__take_u8(ret, &ro);
+    return OW_OK;
+}
+
+ow_status ow_hardware_system_stream_poll(ow_device* dev, int32_t max, int32_t* frames, int32_t* queued, int32_t* dropped, uint8_t* data, size_t data_cap, size_t* data_len)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    ao = ow__pack_i32(args, ao, max);
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_SYSTEM_STREAM_POLL, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (frames) *frames = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (queued) *queued = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (dropped) *dropped = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    ow__take_bytes(ret, &ro, data, (int)data_cap, (int*)data_len);
+    return OW_OK;
+}
+
+ow_status ow_hardware_system_stream_status(ow_device* dev, int32_t* mtu, int32_t* queued, int32_t* droppedto, int32_t* droppedfrom)
+{
+    (void)dev;
+    uint8_t args[512]; int ao = 0;
+    uint8_t ret[512]; int rc;
+    rc = ow_call(CMD_HARDWARE_SYSTEM_STREAM_STATUS, args, ao, ret, (int)sizeof ret);
+    if (rc < 0) return OW_ERR_FAILED;
+    int ro = 0;
+    if (mtu) *mtu = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (queued) *queued = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (droppedto) *droppedto = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
+    if (droppedfrom) *droppedfrom = ow__take_i32(ret, &ro); else ow__take_i32(ret, &ro);
     return OW_OK;
 }
 

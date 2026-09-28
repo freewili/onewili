@@ -17,8 +17,16 @@ extern "C" {
 OW_WASM_IMPORT("ow_call")
 int ow_call(int cmd_index, const uint8_t* args, int args_len, uint8_t* ret, int ret_cap);
 
-/* No transport to set up anymore; kept for API parity. */
-static inline ow_status ow_open_wasm(ow_device* dev) { (void)dev; return OW_OK; }
+/* No transport to set up anymore; kept for API parity. It still clears the
+ * peer-stream fields (a guest's ow_device usually lives on its stack), so
+ * onewili_stream.c's text route works if a guest compiles it in. */
+static inline ow_status ow_open_wasm(ow_device* dev) {
+    if (!dev) return OW_ERR_ARG;
+    dev->stream = 0;
+    dev->stream_local_drops = 0;
+    dev->stream_stash_len = dev->stream_stash_pos = 0;
+    return OW_OK;
+}
 
 /* ---- little-endian arg packers (return new offset) ---- */
 static inline int ow__pack_i32(uint8_t* b, int off, int32_t v) {

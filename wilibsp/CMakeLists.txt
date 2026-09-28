@@ -12,6 +12,7 @@ add_library(onewili_fwgui STATIC
     src/onewili_fwgui.c
     src/onewili_fast.c
     src/onewili_sd.c
+    src/onewili_stream.c
     src/sdfs_client.c
     src/sdfs_codec.c
 )

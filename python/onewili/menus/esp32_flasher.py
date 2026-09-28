@@ -16,11 +16,19 @@ class ESP32Flasher(MenuBase):
 
         Wire: ``w\a\b``
 
-        Instruct the ESP32 to enter into bootloader
+        Opens a ROM-loader session: resets the ESP32 into its bootloader and loads the flasher stub
 
         # Connect To Bootloader
 
-Drives the ESP32's `BOOT` and `EN` pins to put the target into ROM bootloader (download) mode and establishes a serial-loader sync over the UART. Once synced, this command is a prerequisite for all other flash/memory/register operations in this menu.
+Drives the ESP32's `BOOT` and `EN` pins to put the target into ROM bootloader (download) mode and establishes a serial-loader sync over the UART. Once synced, the session stays open for the other flash/memory/register operations in this menu.
+
+## Session
+
+- While a session is open the chip sits in its ROM loader: the FREE-WILi's Wi-Fi/BLE link to it is parked, and Flash From Folder reports `Busy`.
+- `r` (Reset) closes the session and restarts the ESP32 application; `p 1` and a non-zero `t` entry point close it too.
+- A session with no command for 60 s closes itself and restarts the application.
+- Write, erase and memory commands need an open session and answer `Not connected` without one. The read-only queries (`i`, `k`, `m`, `j`, `c`) open a session for themselves when none is open and restart the application afterwards.
+- Calling `b` again restarts the session, so a new baud rate takes effect.
 
 ## Argument
 
@@ -58,7 +66,7 @@ p 1          # Finish flash, reboot
 - **Invalid target** — chip or revision not supported by the loader build.
 - **Invalid response at high baud** — retry with `0` (stay at 115200) or shorter / better-quality wires.
 
-        Enter Baudrate to updgrade to upon successful connection
+        Enter baud rate to switch to once connected (0 keeps 115200)
 
         Args:
             upgrade_transmission_rate: upgrade_transmission_rate (decU32).
@@ -73,7 +81,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\r``
 
-        Instruct the ESP32 to enter into application
+        Closes any loader session and resets the ESP32 into its application
 
         Returns:
             Result: Ok(None) or Err(message).
@@ -85,19 +93,19 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\i``
 
-        Toggle ESP32's Enable Pin
+        Reads the ESP32's chip ID, ECO version and security flags
 
         Returns:
-            Result: Ok(esp_chip_id: int, version: int, sb_en: bool, sbar_en: bool, sdm_en: bool, sbrk_1: bool, sbrk_2: bool, sbrk_3: bool, jtag_sw_dis: bool, jtag_hw_dis: bool, flash_enc_en: bool, dcache_dis: bool, icache_dis: bool) or Err(message).
+            Result: Ok(esp_chip_id: int, version: int, sb_en: bool, sbar_en: bool, sdm_en: bool, sbrk_1: bool, sbrk_2: bool, sbrk_3: bool, jtag_sw_dis: bool, jtag_hw_dis: bool, usb_dis: bool, flash_enc_en: bool, dcache_dis: bool, icache_dis: bool) or Err(message).
         """
-        return self._call("i", [], ["int", "int", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool"])
+        return self._call("i", [], ["int", "int", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool", "bool"])
 
     def read_flash_size(self) -> Result:
         r"""Read Flash Size.
 
         Wire: ``w\a\k``
 
-        Toggle ESP32's Enable Pin
+        Detects the ESP32's flash size in bytes
 
         Returns:
             Result: Ok(flash_size_bytes: int) or Err(message).
@@ -109,7 +117,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\m``
 
-        Returns MAC of esp32
+        Reads the ESP32's factory MAC address
 
         Returns:
             Result: Ok(esp32_mac: str) or Err(message).
@@ -121,7 +129,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\e``
 
-        Toggle ESP32's Enable Pin
+        Erases the ESP32's entire flash. Needs an open loader session
 
         Returns:
             Result: Ok(None) or Err(message).
@@ -133,7 +141,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\f``
 
-        Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes
+        Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes; each Write Flash sends one block
 
         Enter offset (hex), followed by image size (int) and expected block size (int)
 
@@ -152,7 +160,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\p``
 
-        Ends ESP32 Flashing Operations.
+        Ends ESP32 flashing; reboot=1 also closes the session and starts the new image
 
         Reboot esp32 after stopping flash operations (1 - yes, 0 - no:)
 
@@ -169,7 +177,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\o``
 
-        Writes Binary Blob into flash
+        Writes one block (up to the block size given to f) into flash
 
         Enter Byte separated by spaces, up to 128 bytes:
 
@@ -186,7 +194,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\j``
 
-        Reads binary blob from flash with given address and size.
+        Reads up to 128 bytes of ESP32 flash at the given address
 
         Enter offset (hex) followed by size to read
 
@@ -195,54 +203,52 @@ p 1          # Finish flash, reboot
             size: size (decU32).
 
         Returns:
-            Result: Ok(None) or Err(message).
+            Result: Ok(data: bytes | bytearray) or Err(message).
         """
-        return self._call("j", [encoding.enc_hex(offset, 8), encoding.enc_int(size)], [])
+        return self._call("j", [encoding.enc_hex(offset, 8), encoding.enc_int(size)], ["bytes"])
 
-    def start_write_memory_operations(self, offset: int, memory_block: int, block_size: int) -> Result:
+    def start_write_memory_operations(self, offset: int, size: int, block_size: int) -> Result:
         r"""Start Memory Write Operations.
 
         Wire: ``w\a\y``
 
-        Perpares memeory write operations on the esp32. Max Block Size size is 128
+        Prepares a RAM load on the ESP32. Block size can be up to 128 bytes
 
-        Enter offset (hex), followed by image size (int) and expected block size (int)
+        Enter RAM address (hex), followed by image size (int) and block size (int)
 
         Args:
             offset: offset (hexU32).
-            memory_block: memory_block (hexU32).
+            size: size (decU32).
             block_size: block_size (decU32).
 
         Returns:
             Result: Ok(None) or Err(message).
         """
-        return self._call("y", [encoding.enc_hex(offset, 8), encoding.enc_hex(memory_block, 8), encoding.enc_int(block_size)], [])
+        return self._call("y", [encoding.enc_hex(offset, 8), encoding.enc_int(size), encoding.enc_int(block_size)], [])
 
-    def memory_write(self, offset: int, memory_block: int, block_size: int) -> Result:
+    def memory_write(self, data: bytes | bytearray) -> Result:
         r"""Write Memory.
 
         Wire: ``w\a\0``
 
-        Perpares memeory write operations on the esp32. Max Block Size size is 128
+        Writes one block (up to the block size given to y) into ESP32 RAM
 
-        Enter offset (hex), followed by image size (int) and expected block size (int)
+        Enter bytes separated by spaces, up to 128 bytes:
 
         Args:
-            offset: offset (hexU32).
-            memory_block: memory_block (hexU32).
-            block_size: block_size (decU32).
+            data: data (bytearray).
 
         Returns:
             Result: Ok(None) or Err(message).
         """
-        return self._call("0", [encoding.enc_hex(offset, 8), encoding.enc_hex(memory_block, 8), encoding.enc_int(block_size)], [])
+        return self._call("0", [encoding.enc_bytes(data)], [])
 
     def stop_memory_operation(self, entry_address: int) -> Result:
         r"""Stop Memory Write Operations.
 
         Wire: ``w\a\t``
 
-        Disables memory write operations on esp32 and sets entry point in ram
+        Ends a RAM load; a non-zero entry point starts the loaded code and closes the session
 
         Enter entry offset (hex) that the esp32 will boot to in RAM:
 
@@ -294,7 +300,7 @@ p 1          # Finish flash, reboot
 
         Wire: ``w\a\n``
 
-        Flash default application onto ESP32
+        Not available on FW2: there is no built-in image. Use Flash From Folder
 
         Returns:
             Result: Ok(None) or Err(message).
