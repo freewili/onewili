@@ -88,6 +88,25 @@ saves sample bytes, and checks text commands during streaming. It documents the
 FIFO-prefix exclusion used only for measurement. Cleanup stops capture, drives
 the pin LOW, restores the host-streaming gate, and releases both ports.
 
+## Peer streams
+
+`dev.streams` passes best-effort datagrams of 1-128 bytes between OneWili
+clients (the display CPU, the ESP32, the CM0 and this host), routed by the main
+CPU, with the same meaning as `ow_stream_write` / `ow_stream_poll` /
+`ow_stream_drops` in the C packages:
+
+```python
+from onewili.streams import Streams
+
+dev.streams.write(Streams.DISPLAY, b"hello")
+got = dev.streams.poll()          # (src, data) or None
+print(dev.streams.drops())        # datagrams lost anywhere, free-running
+```
+
+A datagram the destination cannot take is dropped and counted, never waited
+for. The main CPU queues a few datagrams for this host between polls, so poll
+regularly.
+
 ## Menus
 
 - `dev.io` - IO functions (hotkey `i`)

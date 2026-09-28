@@ -36,6 +36,14 @@ typedef struct ow_transport {
 #ifndef OW_TEXT_EVENT_QUEUE
 #define OW_TEXT_EVENT_QUEUE 8
 #endif
+/* Bytes of batched peer-stream poll results kept per device on the text
+ * route (PC, CM0): whole [src][len][data] records, at least one max-size
+ * datagram. Part of ow_device's layout, so define it identically for the
+ * library and the application. */
+#ifndef OW_STREAM_STASH
+#define OW_STREAM_STASH 264
+#endif
+struct ow_stream_ops;
 
 typedef struct ow_device {
     ow_transport t;
@@ -46,6 +54,14 @@ typedef struct ow_device {
     char evq[OW_TEXT_EVENT_QUEUE][OW_RESP_MAX];
     uint32_t evq_head, evq_count;
     uint32_t dropped_text_events;
+    /* Peer streams (onewili_stream.h). A push-capable transport binds its
+     * fast path here after ow_open (which clears it); without one, streams
+     * ride MAIN's h\a\w / h\a\p / h\a\c commands and poll results are
+     * batched through the stash. */
+    const struct ow_stream_ops* stream;
+    uint32_t stream_local_drops;
+    uint16_t stream_stash_len, stream_stash_pos;
+    uint8_t stream_stash[OW_STREAM_STASH];
 } ow_device;
 
 /* Sends 0x02 (reset nav to root + quiet mode). */
@@ -323,6 +339,36 @@ ow_status ow_io_canfd_receive_canfd(ow_device* dev, int32_t channel, bool* frame
 #define OW_EVENT_IO_CANFD_CAN_TX1 "canTx1"
 /*   canRxReport (binary) - time_stamp_ns=hexU64, gpio_bitfield=hexU32, can_id=hexU32, header_bits=hexU32, data_words=hexbytes - CAN RX frame report (binary API, MCP2518 memory-map layout) */
 #define OW_EVENT_IO_CANFD_CAN_RX_REPORT "canRxReport"
+/* Enable ISO-TP. Arms (1) or disarms (0) the ISO-TP transport on CAN channel 0: takes the PSRAM staging window, taps received frames and starts answering flow control for messages sent to rxId. Send Message and Send File arm it automatically..  Wire: i\c\t\e */
+ow_status ow_io_canfd_isotp_iso_tp_enable(ow_device* dev, bool enable);
+
+/* Configure Addressing. Sets the CAN ids the transport sends on and listens to, 11/29-bit ids, classic CAN or CAN FD, the TX_DL frame size (8 classic; 8,12,16,20,24,32,48,64 FD), padding and pad byte, and normal (0) or extended (1) addressing with its N_TA byte..  Wire: i\c\t\c */
+ow_status ow_io_canfd_isotp_iso_tp_configure_addressing(ow_device* dev, uint32_t tx_id, uint32_t rx_id, bool extended_id, bool can_fd, int32_t tx_data_length, bool padding, uint32_t pad_byte, int32_t addressing_mode, uint32_t ext_address);
+
+/* Configure Flow Control. Sets what this device advertises in its own flow control frames when receiving -- block size (0 = no limit) and the STmin byte (00-7F ms, F1-F9 = 100-900 us) -- and how many consecutive WAIT frames it tolerates from the peer when sending (default 8)..  Wire: i\c\t\f */
+ow_status ow_io_canfd_isotp_iso_tp_configure_flow_control(ow_device* dev, int32_t block_size, uint32_t st_min, int32_t wft_max);
+
+/* Set STmin Trim. Adjusts how this device paces its consecutive frames: stMinTrimUs is a signed number of microseconds added to the peer's STmin (negative values cancel the SPI write latency of about 100 us); stMinOverrideUs ignores the peer's STmin and paces at exactly that many microseconds (+ trim), -1 follows the peer..  Wire: i\c\t\t */
+ow_status ow_io_canfd_isotp_iso_tp_set_st_min_trim(ow_device* dev, int32_t st_min_trim_us, int32_t st_min_override_us);
+
+/* Send Message. Sends up to 256 bytes as one ISO-TP message (single frame, or first frame + flow-controlled consecutive frames) and blocks until it is delivered, aborted or timed out; returns the result code (0 = Ok), bytes and frames sent, the duration and the measured consecutive-frame gaps in microseconds..  Wire: i\c\t\s */
+ow_status ow_io_canfd_isotp_iso_tp_send_message(ow_device* dev, const uint8_t* data, size_t data_len, int32_t* result, int32_t* bytes, int32_t* frames, int32_t* duration_us, int32_t* min_gap_us, int32_t* max_gap_us, int32_t* avg_gap_us);
+
+/* Send File. Sends the whole content of an SD card file as one ISO-TP message, paging it from the card through a 16 KiB PSRAM window while the peer is not waiting on a frame; blocks like Send Message and returns the same result fields..  Wire: i\c\t\x */
+ow_status ow_io_canfd_isotp_iso_tp_send_file(ow_device* dev, const char* file_path, int32_t* result, int32_t* bytes, int32_t* frames, int32_t* duration_us, int32_t* min_gap_us, int32_t* max_gap_us, int32_t* avg_gap_us);
+
+/* Receive Message. Reports the last ISO-TP message received on rxId: status 0 none, 1 complete, 2 receiving, 3 error; length; inFile=1 when it was longer than 256 bytes and was written to the receive file (then data is empty); otherwise the payload bytes in hex. Reading consumes the message..  Wire: i\c\t\r */
+ow_status ow_io_canfd_isotp_iso_tp_receive_message(ow_device* dev, int32_t* status, int32_t* length, int32_t* in_file, uint8_t* data, size_t data_cap, size_t* data_len);
+
+/* Set Receive File Path. Sets where received ISO-TP messages longer than 256 bytes are written on the SD card (default /isotp/rx.bin); the directory is created when the first such message arrives..  Wire: i\c\t\p */
+ow_status ow_io_canfd_isotp_iso_tp_set_receive_file_path(ow_device* dev, const char* file_path);
+
+/* Abort. Terminates whatever ISO-TP transfer is in progress without sending anything, closes any open card file and leaves the transport armed..  Wire: i\c\t\a */
+ow_status ow_io_canfd_isotp_iso_tp_abort(ow_device* dev);
+
+/* Show Status. Reports the transport state (0 idle, 1 waiting for flow control, 2 sending consecutive frames, 3 waiting for a frame to finish, 4 receiving), the last result code (0 = Ok), and the running counts of messages received, sent and failed since power-up..  Wire: i\c\t\i */
+ow_status ow_io_canfd_isotp_iso_tp_show_status(ow_device* dev, int32_t* state, int32_t* last_result, int32_t* rx_count, int32_t* tx_count, int32_t* errors);
+
 /* Stream Analog In. Streams analog input values to the host at the given rate..  Wire: i\j\s */
 ow_status ow_io_analog_in_enable_analog_in_stream(ow_device* dev, int32_t stream_rate_ms);
 
@@ -1364,6 +1410,15 @@ ow_status ow_hardware_system_device_state(ow_device* dev, char* sd, size_t sd_ca
 /* Event Host Streaming. Enables or disables streaming of events to the host. When disabled, stream-class events are suppressed at the host output; protocol events still flow. Same gate as control bytes 0x05 (off) and 0x06 (on)..  Wire: h\a\e */
 ow_status ow_hardware_system_event_host_streaming(ow_device* dev, int32_t enable, bool* enabled);
 
+/* Stream Write. Sends one peer-stream datagram (1-128 bytes) to another OneWili client through MAIN. Best effort: a datagram the destination cannot take now is dropped and counted, never queued behind..  Wire: h\a\w */
+ow_status ow_hardware_system_stream_write(ow_device* dev, int32_t dst, const uint8_t* data, size_t data_len, bool* delivered);
+
+/* Stream Poll. Pops peer-stream datagrams queued for the calling client: frames popped, frames still queued, frames dropped for this client so far, then the datagrams packed as [src][len][bytes] records..  Wire: h\a\p */
+ow_status ow_hardware_system_stream_poll(ow_device* dev, int32_t max, int32_t* frames, int32_t* queued, int32_t* dropped, uint8_t* data, size_t data_cap, size_t* data_len);
+
+/* Stream Status. Peer-stream state for the calling client: the datagram MTU, datagrams waiting in its queue, datagrams addressed to it that MAIN dropped, and datagrams it sent that MAIN dropped..  Wire: h\a\c */
+ow_status ow_hardware_system_stream_status(ow_device* dev, int32_t* mtu, int32_t* queued, int32_t* droppedto, int32_t* droppedfrom);
+
 
 /* Events emitted by System Functions: */
 /*   battery (text) - data=string - Battery charger status text */
@@ -1494,6 +1549,9 @@ ow_status ow_hardware_display_functions_run_psram_app(ow_device* dev, const char
 /* Load PSRAM Data. Stages /apps/<filename> verbatim into the display's PSRAM at <offset> bytes from 0x11000000, and leaves the loader stub running instead of launching anything. For bulk assets that would otherwise have to travel inside the app's own UF2. The file is taken as raw bytes: no UF2 decode. Repeat for as many blobs as needed, then Run PSRAM App -- the stub stays resident between calls, so only the first pays the two-hop entry, and the launch overwrites only what the app image itself covers. Staged data does NOT survive a display reset..  Wire: h\v\s */
 ow_status ow_hardware_display_functions_load_psram_data(ow_device* dev, const char* filename, uint32_t offset);
 
+/* ESP32 Mode. What the ESP32-C5 runs: Default Firmware (the stock WiFi/BLE app) or OneWili API (a BSP app on the ESP32 drives MAIN's OneWili API). OneWili API does not install an app - flash one first..  Wire: w\e */
+ow_status ow_wireless_e_sp32_mode(ow_device* dev, int32_t value);
+
 /* Enable Reader. Enable/disable NFC reader with auto tag streaming.  Wire: w\n\r */
 ow_status ow_wireless_nfc_enable_reader(ow_device* dev, int32_t enable);
 
@@ -1555,43 +1613,43 @@ ow_status ow_wireless_nfc_raw_transceive(ow_device* dev, uint32_t flags, int32_t
 /* Halt Card. Send HLTA command to put card in HALT state.  Wire: w\n\x\a */
 ow_status ow_wireless_nfc_extra_halt_card(ow_device* dev);
 
-/* Connect To Bootloader. Instruct the ESP32 to enter into bootloader.  Wire: w\a\b */
+/* Connect To Bootloader. Opens a ROM-loader session: resets the ESP32 into its bootloader and loads the flasher stub.  Wire: w\a\b */
 ow_status ow_wireless_esp32_flasher_enter_bootloader(ow_device* dev, int32_t upgrade_transmission_rate);
 
-/* Reset. Instruct the ESP32 to enter into application.  Wire: w\a\r */
+/* Reset. Closes any loader session and resets the ESP32 into its application.  Wire: w\a\r */
 ow_status ow_wireless_esp32_flasher_enter_application(ow_device* dev);
 
-/* Read Chip ID And Security Info. Toggle ESP32's Enable Pin.  Wire: w\a\i */
-ow_status ow_wireless_esp32_flasher_get_i_dand_security(ow_device* dev, int32_t* esp_chip_id, int32_t* version, bool* sb_en, bool* sbar_en, bool* sdm_en, bool* sbrk_1, bool* sbrk_2, bool* sbrk_3, bool* jtag_sw_dis, bool* jtag_hw_dis, bool* flash_enc_en, bool* dcache_dis, bool* icache_dis);
+/* Read Chip ID And Security Info. Reads the ESP32's chip ID, ECO version and security flags.  Wire: w\a\i */
+ow_status ow_wireless_esp32_flasher_get_i_dand_security(ow_device* dev, int32_t* esp_chip_id, int32_t* version, bool* sb_en, bool* sbar_en, bool* sdm_en, bool* sbrk_1, bool* sbrk_2, bool* sbrk_3, bool* jtag_sw_dis, bool* jtag_hw_dis, bool* usb_dis, bool* flash_enc_en, bool* dcache_dis, bool* icache_dis);
 
-/* Read Flash Size. Toggle ESP32's Enable Pin.  Wire: w\a\k */
+/* Read Flash Size. Detects the ESP32's flash size in bytes.  Wire: w\a\k */
 ow_status ow_wireless_esp32_flasher_read_flash_size(ow_device* dev, int32_t* flash_size_bytes);
 
-/* Read MAC. Returns MAC of esp32.  Wire: w\a\m */
+/* Read MAC. Reads the ESP32's factory MAC address.  Wire: w\a\m */
 ow_status ow_wireless_esp32_flasher_read_esp32mac(ow_device* dev, char* esp32_mac, size_t esp32_mac_cap);
 
-/* Erase All Flash. Toggle ESP32's Enable Pin.  Wire: w\a\e */
+/* Erase All Flash. Erases the ESP32's entire flash. Needs an open loader session.  Wire: w\a\e */
 ow_status ow_wireless_esp32_flasher_erase_all_flash(ow_device* dev);
 
-/* Start Writing Flash Operations. Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes.  Wire: w\a\f */
+/* Start Writing Flash Operations. Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes; each Write Flash sends one block.  Wire: w\a\f */
 ow_status ow_wireless_esp32_flasher_start_flash_operations(ow_device* dev, uint32_t offset, int32_t size, int32_t block_size);
 
-/* Finish Flash Writing Operations. Ends ESP32 Flashing Operations..  Wire: w\a\p */
+/* Finish Flash Writing Operations. Ends ESP32 flashing; reboot=1 also closes the session and starts the new image.  Wire: w\a\p */
 ow_status ow_wireless_esp32_flasher_stop_flash_operation(ow_device* dev, bool reboot);
 
-/* Write Flash. Writes Binary Blob into flash.  Wire: w\a\o */
+/* Write Flash. Writes one block (up to the block size given to f) into flash.  Wire: w\a\o */
 ow_status ow_wireless_esp32_flasher_flash_write(ow_device* dev, const uint8_t* flash_data, size_t flash_data_len);
 
-/* Read Flash. Reads binary blob from flash with given address and size..  Wire: w\a\j */
-ow_status ow_wireless_esp32_flasher_flash_read(ow_device* dev, uint32_t offset, int32_t size);
+/* Read Flash. Reads up to 128 bytes of ESP32 flash at the given address.  Wire: w\a\j */
+ow_status ow_wireless_esp32_flasher_flash_read(ow_device* dev, uint32_t offset, int32_t size, uint8_t* data, size_t data_cap, size_t* data_len);
 
-/* Start Memory Write Operations. Perpares memeory write operations on the esp32. Max Block Size size is 128.  Wire: w\a\y */
-ow_status ow_wireless_esp32_flasher_start_write_memory_operations(ow_device* dev, uint32_t offset, uint32_t memory_block, int32_t block_size);
+/* Start Memory Write Operations. Prepares a RAM load on the ESP32. Block size can be up to 128 bytes.  Wire: w\a\y */
+ow_status ow_wireless_esp32_flasher_start_write_memory_operations(ow_device* dev, uint32_t offset, int32_t size, int32_t block_size);
 
-/* Write Memory. Perpares memeory write operations on the esp32. Max Block Size size is 128.  Wire: w\a\0 */
-ow_status ow_wireless_esp32_flasher_memory_write(ow_device* dev, uint32_t offset, uint32_t memory_block, int32_t block_size);
+/* Write Memory. Writes one block (up to the block size given to y) into ESP32 RAM.  Wire: w\a\0 */
+ow_status ow_wireless_esp32_flasher_memory_write(ow_device* dev, const uint8_t* data, size_t data_len);
 
-/* Stop Memory Write Operations. Disables memory write operations on esp32 and sets entry point in ram.  Wire: w\a\t */
+/* Stop Memory Write Operations. Ends a RAM load; a non-zero entry point starts the loaded code and closes the session.  Wire: w\a\t */
 ow_status ow_wireless_esp32_flasher_stop_memory_operation(ow_device* dev, uint32_t entry_address);
 
 /* Write Register. Writes a 4 byte value onto a register in the esp32.  Wire: w\a\g */
@@ -1600,7 +1658,7 @@ ow_status ow_wireless_esp32_flasher_register_write(ow_device* dev, uint32_t offs
 /* Read Register. Reads a 4 byte value from a register in the esp32.  Wire: w\a\c */
 ow_status ow_wireless_esp32_flasher_register_read(ow_device* dev, uint32_t offset, uint32_t* memory_block);
 
-/* Flash Default App. Flash default application onto ESP32.  Wire: w\a\n */
+/* Flash Default App. Not available on FW2: there is no built-in image. Use Flash From Folder.  Wire: w\a\n */
 ow_status ow_wireless_esp32_flasher_flash_default(ow_device* dev);
 
 /* Flash From Folder. Flashes the ESP32 from an idf.py build folder on the SD card.  Wire: w\a\w */

@@ -8,6 +8,7 @@
 #endif
 #include "pico/time.h"
 #include "onewili_sd.h"
+#include "onewili_stream.h"
 #include "ow_sdfs_frame.h"
 #include "sdfs_wire.h"
 
@@ -28,9 +29,13 @@
 #define OWFW_CMD_RESPONSE  0x5D    /* FWGUI_API_ONEWILL_RESPONSE    */
 #define OWFW_CMD_BINARY    0x5E    /* FWGUI_API_ONEWILL_BINARY      */
 #define OWFW_CMD_SDFS      0x5F    /* FWGUI_API_SDFS_DATA           */
+#define OWFW_CMD_STREAM    0xF1    /* FWGUI_API_ONEWILL_STREAM      */
+#define OWFW_EVT_STREAM    0xF1    /* FWGUI_EVENT_ONEWILI_STREAM (241) */
 #define OWFW_SDFS_SLOTS    8       /* SDFS RX frames buffered       */
 #define OWFW_SDFS_POLL_US  1000    /* an idle recv poll costs ~1 ms */
+#define OWFW_STREAM_RING   2048    /* peer-stream datagram FIFO (bytes) */
 #define OWFW_FRAME_MAX     512     /* incoming command frame payload cap */
+#define OWFW_EVT_OVERHEAD  7       /* event frame: sync(2) + len(2) + code(1) + cksum(2) */
 
 /* Receive path sizing.
  *
@@ -106,6 +111,63 @@ static void sdfs_push(const uint8_t* p, uint16_t n) {
     g_sdfs_count++;
 }
 
+/* ── Peer-stream datagram FIFO ─────────────────────────────────────────── */
+/* Datagrams (0xF1, see ow_stream_wire.h) keep their boundaries: each is one
+ * [src][len][data] record in a byte FIFO, so small datagrams cost their size
+ * rather than a whole MTU slot -- a sender's full credit window of 1-byte
+ * datagrams (69) fits with room to spare. Drop-newest on overflow, counted
+ * apart from dropped_frames: stream losses belong to ow_stream_drops, which
+ * has one meaning on every target. Control frames (HELLO/CREDIT) are
+ * hop-local and go straight to the shared push-link client instead. Filled
+ * and drained only from owfw_pump's caller context, never from the IRQ. */
+static uint8_t        g_stream[OWFW_STREAM_RING];
+static uint32_t       g_stream_head, g_stream_used, g_stream_count;
+static ow_stream_link g_link;
+
+static void stream_put(const uint8_t* p, uint32_t n) {
+    uint32_t tail = (g_stream_head + g_stream_used) % OWFW_STREAM_RING;
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        g_stream[tail] = p[i];
+        if (++tail == OWFW_STREAM_RING) tail = 0;
+    }
+    g_stream_used += n;
+}
+
+static void stream_take(uint8_t* out, uint32_t n) {
+    uint32_t i;
+    for (i = 0; i < n; i++) {
+        if (out) out[i] = g_stream[g_stream_head];
+        if (++g_stream_head == OWFW_STREAM_RING) g_stream_head = 0;
+    }
+    g_stream_used -= n;
+}
+
+static void stream_rx(const uint8_t* p, uint16_t n) {
+    uint8_t hdr[2];
+    if (n >= 1 && p[0] >= OW_STREAM_CTL_FIRST) {
+        if (p[0] == OW_STREAM_CTL_CREDIT && n < OW_STREAM_HDR + OW_STREAM_CREDIT_LEN)
+            g_stats.stream_malformed++;
+        ow_stream_link_control(&g_link, p, n);
+        return;
+    }
+    /* MAIN only ever routes us datagrams addressed to us, stamped with the
+     * real sender, 1..MTU bytes long; anything else passed the checksum but
+     * is not something we can hand to ow_stream_poll. */
+    if (n < OW_STREAM_HDR + 1u || n > OW_STREAM_HDR + OW_STREAM_MTU ||
+        p[0] != OW_STREAM_PEER_DISPLAY || p[1] >= OW_STREAM_PEER_COUNT) {
+        g_stats.stream_malformed++;
+        return;
+    }
+    if (OWFW_STREAM_RING - g_stream_used < 2u + (n - OW_STREAM_HDR)) { g_stats.stream_dropped++; return; }
+    hdr[0] = p[1];
+    hdr[1] = (uint8_t)(n - OW_STREAM_HDR);
+    stream_put(hdr, 2);
+    stream_put(p + OW_STREAM_HDR, hdr[1]);
+    g_stream_count++;
+    if (g_stream_used > g_stats.stream_max_fill) g_stats.stream_max_fill = g_stream_used;
+}
+
 /* ── RX: BE BA command-frame parser ────────────────────────────────────── */
 /* frame: BE BA | len u16le | cmd u8 | payload[len] | cksum u16le
  * checksum = 16-bit additive sum of sync(2)+length(2)+cmd(1)+payload. */
@@ -116,7 +178,6 @@ static struct {
     uint16_t len, got, sum, ck;
     uint8_t  cmd;
     uint8_t  payload[OWFW_FRAME_MAX];
-    int      overlong;           /* payload > OWFW_FRAME_MAX: parse, discard */
 } g_rx;
 
 static void rx_byte(uint8_t b) {
@@ -130,9 +191,21 @@ static void rx_byte(uint8_t b) {
         break;
     case RX_LEN0: g_rx.sum += b; g_rx.len = b;               g_rx.st = RX_LEN1; break;
     case RX_LEN1:
-        g_rx.sum += b; g_rx.len |= (uint16_t)(b << 8);
+        g_rx.len |= (uint16_t)(b << 8);
+        if (g_rx.len > OWFW_FRAME_MAX) {
+            /* Nothing MAIN sends is this long: this is a false sync or a
+             * corrupt length, which would otherwise swallow up to 64 KB of
+             * good frames as payload. Resync now, rescanning the two length
+             * bytes -- they may be the start of the real next frame. */
+            uint8_t lo = (uint8_t)(g_rx.len & 0xFF);
+            g_stats.length_errors++;
+            g_rx.st = RX_SYNC0;
+            rx_byte(lo);
+            rx_byte(b);
+            break;
+        }
+        g_rx.sum += b;
         g_rx.got = 0;
-        g_rx.overlong = g_rx.len > OWFW_FRAME_MAX;
         g_rx.st = RX_CMD;
         break;
     case RX_CMD:
@@ -141,16 +214,17 @@ static void rx_byte(uint8_t b) {
         break;
     case RX_PAYLOAD:
         g_rx.sum += b;
-        if (!g_rx.overlong) g_rx.payload[g_rx.got] = b;
+        g_rx.payload[g_rx.got] = b;
         if (++g_rx.got >= g_rx.len) g_rx.st = RX_CK0;
         break;
     case RX_CK0: g_rx.ck = b; g_rx.st = RX_CK1; break;
     case RX_CK1:
         g_rx.ck |= (uint16_t)(b << 8);
-        if (g_rx.ck == g_rx.sum && !g_rx.overlong) {
+        if (g_rx.ck == g_rx.sum) {
             if (g_rx.cmd == OWFW_CMD_RESPONSE) { g_stats.frames_text++;   fifo_push_frame(&g_text, g_rx.payload, g_rx.len); }
             else if (g_rx.cmd == OWFW_CMD_BINARY) { g_stats.frames_binary++; fifo_push_frame(&g_binary, g_rx.payload, g_rx.len); }
             else if (g_rx.cmd == OWFW_CMD_SDFS) { g_stats.frames_sdfs++;   sdfs_push(g_rx.payload, g_rx.len); }
+            else if (g_rx.cmd == OWFW_CMD_STREAM) { g_stats.frames_stream++; stream_rx(g_rx.payload, g_rx.len); }
             else g_stats.frames_other++;     /* every other command code (GUI traffic) is discarded */
         } else {
             g_stats.checksum_errors++;
@@ -241,20 +315,46 @@ static void owfw_send_chunk(const uint8_t* text, uint8_t n) {
 
 /* Generic B0 1D event frame: sync | len u16le (excludes event code) |
  * event code | payload | cksum u16le (additive sum over every preceding
- * byte). Fire-and-forget, like owfw_send_chunk — no response is read. */
-static void owfw_send_event(uint8_t event_code, const uint8_t* payload, uint8_t n) {
-    uint8_t f[2 + 2 + 1 + 32 + 2];
-    uint16_t len = (uint16_t)n;
-    uint32_t k = 0;
-    f[k++] = OWFW_EVT_SYNC0; f[k++] = OWFW_EVT_SYNC1;
-    f[k++] = (uint8_t)(len & 0xFF); f[k++] = (uint8_t)(len >> 8);
-    f[k++] = event_code;
-    memcpy(&f[k], payload, n); k += n;
+ * byte). Returns the frame size, or 0 if it would not fit in cap. */
+static size_t owfw_frame_event(uint8_t* f, size_t cap, uint8_t event_code,
+                               const uint8_t* payload, size_t n) {
+    size_t k = 0, i;
     uint16_t sum = 0;
-    for (uint32_t i = 0; i < k; i++) sum = (uint16_t)(sum + f[i]);
+    if (n > 0xFFFFu || n + OWFW_EVT_OVERHEAD > cap) return 0;
+    f[k++] = OWFW_EVT_SYNC0; f[k++] = OWFW_EVT_SYNC1;
+    f[k++] = (uint8_t)(n & 0xFF); f[k++] = (uint8_t)(n >> 8);
+    f[k++] = event_code;
+    if (n) memcpy(&f[k], payload, n);
+    k += n;
+    for (i = 0; i < k; i++) sum = (uint16_t)(sum + f[i]);
     f[k++] = (uint8_t)(sum & 0xFF); f[k++] = (uint8_t)(sum >> 8);
+    return k;
+}
+
+/* Small fire-and-forget events, like owfw_send_chunk -- no response is read.
+ * An event too long for the stack buffer is not sent rather than overrunning
+ * it. */
+static void owfw_send_event(uint8_t event_code, const uint8_t* payload, uint8_t n) {
+    uint8_t f[OWFW_EVT_OVERHEAD + 32];
+    size_t k = owfw_frame_event(f, sizeof f, event_code, payload, n);
+    if (k == 0) return;
     uart_write_blocking(uart0, f, k);
-    g_stats.tx_bytes += k;
+    g_stats.tx_bytes += (uint32_t)k;
+}
+
+/* One stream payload P as exactly one event 0xF1 frame -- the send hook of
+ * the shared push-link client (ow_stream_link). Its own buffer, sized for
+ * the largest P. */
+static int owfw_stream_send(void* ctx, const uint8_t* p, uint32_t n) {
+    uint8_t f[OWFW_EVT_OVERHEAD + OW_STREAM_HDR + OW_STREAM_MTU];
+    size_t k;
+    (void)ctx;
+    if (n == 0) return -1;
+    k = owfw_frame_event(f, sizeof f, OWFW_EVT_STREAM, p, n);
+    if (k == 0) return -1;
+    uart_write_blocking(uart0, f, k);
+    g_stats.tx_bytes += (uint32_t)k;
+    return 0;
 }
 
 static int owfw_write(void* ctx, const uint8_t* data, size_t len) {
@@ -331,6 +431,49 @@ sdfs_transport_t ow_fwgui_sdfs_transport(void) {
     return t;
 }
 
+/* ── Peer streams (onewili_stream.h fast path) ─────────────────────────── */
+/* The protocol (HELLO, keepalive, CREDIT window, MAIN's drop totals) is the
+ * shared ow_stream_link; this layer only frames it onto the link, queues
+ * received datagrams, and never waits: poll and drops only pump what the
+ * IRQ already buffered. */
+#ifdef OWFW_NO_IRQ
+static uint32_t g_owfw_host_ms;   /* host builds have no pico timer: tests drive this */
+static uint32_t owfw_now_ms(void* ctx) { (void)ctx; return g_owfw_host_ms; }
+#else
+static uint32_t owfw_now_ms(void* ctx) { (void)ctx; return to_ms_since_boot(get_absolute_time()); }
+#endif
+
+static ow_status owfw_stream_write(void* ctx, uint8_t dst, const uint8_t* data, uint32_t len) {
+    (void)ctx;
+    owfw_pump();                  /* a CREDIT already in the ring may reopen the window */
+    return ow_stream_link_write(&g_link, dst, data, len);
+}
+
+static int owfw_stream_poll(void* ctx, uint8_t* src, uint8_t* buf, uint32_t cap) {
+    uint8_t hdr[2];
+    (void)ctx;
+    owfw_pump();
+    ow_stream_link_service(&g_link);   /* HELLO: announces us and keeps MAIN's latch open */
+    if (!g_stream_count) return 0;
+    stream_take(hdr, 2);
+    g_stream_count--;
+    if (hdr[1] > cap) { stream_take(0, hdr[1]); g_stats.stream_dropped++; return -(int)OW_ERR_BUFFER; }
+    stream_take(buf, hdr[1]);
+    *src = hdr[0];
+    return (int)hdr[1];
+}
+
+static uint32_t owfw_stream_drops(void* ctx) {
+    (void)ctx;
+    owfw_pump();                  /* fold in MAIN's latest totals */
+    ow_stream_link_service(&g_link);   /* and write off frames that died on the way */
+    return ow_stream_link_drops(&g_link) + g_stats.stream_dropped + g_stats.stream_malformed;
+}
+
+static const ow_stream_ops g_stream_ops = {
+    0, owfw_stream_write, owfw_stream_poll, owfw_stream_drops
+};
+
 /* ── Public API ────────────────────────────────────────────────────────── */
 ow_status ow_open_fwgui(ow_device* dev) {
     ow_status st;
@@ -346,6 +489,8 @@ ow_status ow_open_fwgui(ow_device* dev) {
     g_binary.head = g_binary.count = 0;
     memset(g_sdfs, 0, sizeof g_sdfs);
     g_sdfs_head = g_sdfs_count = 0;
+    g_stream_head = g_stream_used = g_stream_count = 0;
+    ow_stream_link_init(&g_link, OW_STREAM_PEER_DISPLAY, owfw_stream_send, owfw_now_ms, 0);
     memset(&g_stats, 0, sizeof g_stats);
     g_ring_head = g_ring_tail = 0;
     uart_init(uart0, 8000000);   /* OWFW_BAUD */
@@ -374,6 +519,9 @@ ow_status ow_open_fwgui(ow_device* dev) {
     t.read = owfw_read_text;
     st = ow_open(dev, &t);
     if (st != OW_OK) return st;
+    /* ow_open cleared dev->stream: from here on streams take this link's
+     * push path instead of MAIN's text commands. */
+    ow_stream_bind(dev, &g_stream_ops);
     /* Arm SD access (see onewili_sd.h). Failures here are not fatal: they just
      * mean MAIN is not answering yet, and ow_sd_* calls will report it. */
     sd = ow_fwgui_sdfs_transport();
@@ -392,7 +540,13 @@ ow_transport ow_fwgui_binary_transport(void) {
 uint32_t ow_fwgui_dropped_frames(void) { return g_stats.dropped_frames; }
 
 void ow_fwgui_get_stats(ow_fwgui_stats* out) {
-    if (out) *out = g_stats;
+    if (!out) return;
+    *out = g_stats;
+    out->stream_tx_frames  = g_link.tx_frames;
+    out->stream_tx_refused = g_link.tx_refused;
+    out->stream_tx_lost    = g_link.tx_lost;
+    out->stream_credits    = g_link.credits;
+    out->stream_confirmed  = g_link.confirmed;
 }
 
 void ow_fwgui_send_power_zones(uint32_t zone_mask) {

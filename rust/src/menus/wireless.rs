@@ -1,6 +1,7 @@
 //! Wireless menu - generated from fwMenuWireless. Do not edit.
 
-use crate::transport::Transport;
+use crate::encoding;
+use crate::transport::{OwError, Transport};
 
 pub struct Wireless<'a> {
     pub(crate) t: &'a mut Transport,
@@ -45,5 +46,13 @@ impl<'a> Wireless<'a> {
     /// RFID Functions sub-menu.
     pub fn rfid(self) -> super::rfid::Rfid<'a> {
         super::rfid::Rfid { t: self.t }
+    }
+
+    /// ESP32 Mode. What the ESP32-C5 runs: Default Firmware (the stock WiFi/BLE app) or OneWili API (a BSP app on the ESP32 drives MAIN's OneWili API). OneWili API does not install an app - flash one first.. Wire: `w\e`
+    pub fn e_sp32_mode(&mut self, value: i32) -> Result<(), OwError> {
+        let mut cmd = String::from("w\\e");
+        encoding::push_int(&mut cmd, value as i64);
+        self.t.call(&cmd)?;
+        Ok(())
     }
 }

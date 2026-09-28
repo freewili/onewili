@@ -26,6 +26,7 @@ Hand-written, covering capabilities that are not menu commands:
   - [SPI Functions](spi.md) - `dev.io.spi` (`i\e`)
     - [SPI Settings](spi_settings.md) - `dev.io.spi.settings` (`i\e\s`)
   - [CANFD Functions](canfd.md) - `dev.io.canfd` (`i\c`)
+    - [ISO-TP Transport](isotp.md) - `dev.io.canfd.isotp` (`i\c\t`)
   - [Analog In Functions](analog_in.md) - `dev.io.analog_in` (`i\j`)
   - [Analog Out & Trigger Functions](analog_out.md) - `dev.io.analog_out` (`i\a`)
   - [Logic Player Functions](logic_player.md) - `dev.io.logic_player` (`i\p`)

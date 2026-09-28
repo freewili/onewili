@@ -4,13 +4,21 @@
 
 ## enter_bootloader
 
-Connect To Bootloader. Instruct the ESP32 to enter into bootloader
+Connect To Bootloader. Opens a ROM-loader session: resets the ESP32 into its bootloader and loads the flasher stub
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
 #### Connect To Bootloader
 
-Drives the ESP32's `BOOT` and `EN` pins to put the target into ROM bootloader (download) mode and establishes a serial-loader sync over the UART. Once synced, this command is a prerequisite for all other flash/memory/register operations in this menu.
+Drives the ESP32's `BOOT` and `EN` pins to put the target into ROM bootloader (download) mode and establishes a serial-loader sync over the UART. Once synced, the session stays open for the other flash/memory/register operations in this menu.
+
+##### Session
+
+- While a session is open the chip sits in its ROM loader: the FREE-WILi's Wi-Fi/BLE link to it is parked, and Flash From Folder reports `Busy`.
+- `r` (Reset) closes the session and restarts the ESP32 application; `p 1` and a non-zero `t` entry point close it too.
+- A session with no command for 60 s closes itself and restarts the application.
+- Write, erase and memory commands need an open session and answer `Not connected` without one. The read-only queries (`i`, `k`, `m`, `j`, `c`) open a session for themselves when none is open and restart the application afterwards.
+- Calling `b` again restarts the session, so a new baud rate takes effect.
 
 ##### Argument
 
@@ -73,7 +81,7 @@ dev.wireless.esp32_flasher.enter_bootloader(upgrade_transmission_rate)   # check
 
 ## enter_application
 
-Reset. Instruct the ESP32 to enter into application
+Reset. Closes any loader session and resets the ESP32 into its application
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -98,22 +106,22 @@ dev.wireless.esp32_flasher.enter_application()   # check dev.ok
 
 ## get_i_dand_security
 
-Read Chip ID And Security Info. Toggle ESP32's Enable Pin
+Read Chip ID And Security Info. Reads the ESP32's chip ID, ECO version and security flags
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
 Wire command: `w\a\i`
 
-Returns: esp_chip_id (decU32), version (decU32), sb_en (bool), sbar_en (bool), sdm_en (bool), sbrk_1 (bool), sbrk_2 (bool), sbrk_3 (bool), jtag_sw_dis (bool), jtag_hw_dis (bool), flash_enc_en (bool), dcache_dis (bool), icache_dis (bool)
+Returns: esp_chip_id (decU32), version (decU32), sb_en (bool), sbar_en (bool), sdm_en (bool), sbrk_1 (bool), sbrk_2 (bool), sbrk_3 (bool), jtag_sw_dis (bool), jtag_hw_dis (bool), usb_dis (bool), flash_enc_en (bool), dcache_dis (bool), icache_dis (bool)
 
 ```python
 dev.wireless.esp32_flasher.get_i_dand_security() -> Result
 ```
 ```c
-ow_status ow_wireless_esp32_flasher_get_i_dand_security(ow_device* dev, int32_t* esp_chip_id, int32_t* version, bool* sb_en, bool* sbar_en, bool* sdm_en, bool* sbrk_1, bool* sbrk_2, bool* sbrk_3, bool* jtag_sw_dis, bool* jtag_hw_dis, bool* flash_enc_en, bool* dcache_dis, bool* icache_dis);
+ow_status ow_wireless_esp32_flasher_get_i_dand_security(ow_device* dev, int32_t* esp_chip_id, int32_t* version, bool* sb_en, bool* sbar_en, bool* sdm_en, bool* sbrk_1, bool* sbrk_2, bool* sbrk_3, bool* jtag_sw_dis, bool* jtag_hw_dis, bool* usb_dis, bool* flash_enc_en, bool* dcache_dis, bool* icache_dis);
 ```
 ```rust
-dev.wireless().esp32_flasher().get_i_dand_security() -> Result<(i32, i32, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool), OwError>
+dev.wireless().esp32_flasher().get_i_dand_security() -> Result<(i32, i32, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool), OwError>
 ```
 
 The C and Rust signatures above are also the WASM guest signatures - the device API surface is identical; only the transport differs (`ow_open_wasm(&dev)` in C, `OneWili::open()` in Rust).
@@ -123,7 +131,7 @@ dev.wireless.esp32_flasher.get_i_dand_security()   # returns value; check dev.ok
 
 ## read_flash_size
 
-Read Flash Size. Toggle ESP32's Enable Pin
+Read Flash Size. Detects the ESP32's flash size in bytes
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -148,7 +156,7 @@ dev.wireless.esp32_flasher.read_flash_size()   # returns value; check dev.ok
 
 ## read_esp32mac
 
-Read MAC. Returns MAC of esp32
+Read MAC. Reads the ESP32's factory MAC address
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -173,7 +181,7 @@ dev.wireless.esp32_flasher.read_esp32mac()   # returns value; check dev.ok
 
 ## erase_all_flash
 
-Erase All Flash. Toggle ESP32's Enable Pin
+Erase All Flash. Erases the ESP32's entire flash. Needs an open loader session
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -198,7 +206,7 @@ dev.wireless.esp32_flasher.erase_all_flash()   # check dev.ok
 
 ## start_flash_operations
 
-Start Writing Flash Operations. Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes
+Start Writing Flash Operations. Prepares ESP32 to write flash at offset and expected size. Block size can be up to 128 bytes; each Write Flash sends one block
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -229,7 +237,7 @@ dev.wireless.esp32_flasher.start_flash_operations(offset, size, block_size)   # 
 
 ## stop_flash_operation
 
-Finish Flash Writing Operations. Ends ESP32 Flashing Operations.
+Finish Flash Writing Operations. Ends ESP32 flashing; reboot=1 also closes the session and starts the new image
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -258,7 +266,7 @@ dev.wireless.esp32_flasher.stop_flash_operation(reboot)   # check dev.ok
 
 ## flash_write
 
-Write Flash. Writes Binary Blob into flash
+Write Flash. Writes one block (up to the block size given to f) into flash
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -287,7 +295,7 @@ dev.wireless.esp32_flasher.flash_write(flash_data)   # check dev.ok
 
 ## flash_read
 
-Read Flash. Reads binary blob from flash with given address and size.
+Read Flash. Reads up to 128 bytes of ESP32 flash at the given address
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -298,26 +306,26 @@ Wire command: `w\a\j`
 | offset | hexU32 |
 | size | decU32 |
 
-Returns: none (Ok/Err only)
+Returns: data (hexbytes)
 
 ```python
 dev.wireless.esp32_flasher.flash_read(offset: int, size: int) -> Result
 ```
 ```c
-ow_status ow_wireless_esp32_flasher_flash_read(ow_device* dev, uint32_t offset, int32_t size);
+ow_status ow_wireless_esp32_flasher_flash_read(ow_device* dev, uint32_t offset, int32_t size, uint8_t* data, size_t data_cap, size_t* data_len);
 ```
 ```rust
-dev.wireless().esp32_flasher().flash_read(offset: u32, size: i32) -> Result<(), OwError>
+dev.wireless().esp32_flasher().flash_read(offset: u32, size: i32) -> Result<Vec<u8>, OwError>
 ```
 
 The C and Rust signatures above are also the WASM guest signatures - the device API surface is identical; only the transport differs (`ow_open_wasm(&dev)` in C, `OneWili::open()` in Rust).
 ```rthon
-dev.wireless.esp32_flasher.flash_read(offset, size)   # check dev.ok
+dev.wireless.esp32_flasher.flash_read(offset, size)   # returns value; check dev.ok
 ```
 
 ## start_write_memory_operations
 
-Start Memory Write Operations. Perpares memeory write operations on the esp32. Max Block Size size is 128
+Start Memory Write Operations. Prepares a RAM load on the ESP32. Block size can be up to 128 bytes
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -326,29 +334,29 @@ Wire command: `w\a\y`
 | Arg | Wire type |
 |---|---|
 | offset | hexU32 |
-| memory_block | hexU32 |
+| size | decU32 |
 | block_size | decU32 |
 
 Returns: none (Ok/Err only)
 
 ```python
-dev.wireless.esp32_flasher.start_write_memory_operations(offset: int, memory_block: int, block_size: int) -> Result
+dev.wireless.esp32_flasher.start_write_memory_operations(offset: int, size: int, block_size: int) -> Result
 ```
 ```c
-ow_status ow_wireless_esp32_flasher_start_write_memory_operations(ow_device* dev, uint32_t offset, uint32_t memory_block, int32_t block_size);
+ow_status ow_wireless_esp32_flasher_start_write_memory_operations(ow_device* dev, uint32_t offset, int32_t size, int32_t block_size);
 ```
 ```rust
-dev.wireless().esp32_flasher().start_write_memory_operations(offset: u32, memory_block: u32, block_size: i32) -> Result<(), OwError>
+dev.wireless().esp32_flasher().start_write_memory_operations(offset: u32, size: i32, block_size: i32) -> Result<(), OwError>
 ```
 
 The C and Rust signatures above are also the WASM guest signatures - the device API surface is identical; only the transport differs (`ow_open_wasm(&dev)` in C, `OneWili::open()` in Rust).
 ```rthon
-dev.wireless.esp32_flasher.start_write_memory_operations(offset, memory_block, block_size)   # check dev.ok
+dev.wireless.esp32_flasher.start_write_memory_operations(offset, size, block_size)   # check dev.ok
 ```
 
 ## memory_write
 
-Write Memory. Perpares memeory write operations on the esp32. Max Block Size size is 128
+Write Memory. Writes one block (up to the block size given to y) into ESP32 RAM
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -356,30 +364,28 @@ Wire command: `w\a\0`
 
 | Arg | Wire type |
 |---|---|
-| offset | hexU32 |
-| memory_block | hexU32 |
-| block_size | decU32 |
+| data | bytearray |
 
 Returns: none (Ok/Err only)
 
 ```python
-dev.wireless.esp32_flasher.memory_write(offset: int, memory_block: int, block_size: int) -> Result
+dev.wireless.esp32_flasher.memory_write(data: bytes | bytearray) -> Result
 ```
 ```c
-ow_status ow_wireless_esp32_flasher_memory_write(ow_device* dev, uint32_t offset, uint32_t memory_block, int32_t block_size);
+ow_status ow_wireless_esp32_flasher_memory_write(ow_device* dev, const uint8_t* data, size_t data_len);
 ```
 ```rust
-dev.wireless().esp32_flasher().memory_write(offset: u32, memory_block: u32, block_size: i32) -> Result<(), OwError>
+dev.wireless().esp32_flasher().memory_write(data: &[u8]) -> Result<(), OwError>
 ```
 
 The C and Rust signatures above are also the WASM guest signatures - the device API surface is identical; only the transport differs (`ow_open_wasm(&dev)` in C, `OneWili::open()` in Rust).
 ```rthon
-dev.wireless.esp32_flasher.memory_write(offset, memory_block, block_size)   # check dev.ok
+dev.wireless.esp32_flasher.memory_write(data)   # check dev.ok
 ```
 
 ## stop_memory_operation
 
-Stop Memory Write Operations. Disables memory write operations on esp32 and sets entry point in ram
+Stop Memory Write Operations. Ends a RAM load; a non-zero entry point starts the loaded code and closes the session
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 
@@ -467,7 +473,7 @@ dev.wireless.esp32_flasher.register_read(offset)   # returns value; check dev.ok
 
 ## flash_default
 
-Flash Default App. Flash default application onto ESP32
+Flash Default App. Not available on FW2: there is no built-in image. Use Flash From Folder
 
 Requires power zone 5 (ESP32). See [Errors](errors.md).
 

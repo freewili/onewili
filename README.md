@@ -3,7 +3,7 @@
 The complete command API for [FREE-WILi](https://freewili.com) devices, in
 every language we ship it in.
 
-One device API, one wire protocol, 614 commands across 82 menus — everything
+One device API, one wire protocol, 628 commands across 83 menus — everything
 the on-device menu system can do, callable from a PC, from another CPU on the
 board, or from a program running on the device itself.
 
@@ -87,6 +87,16 @@ C and Rust expose polling calls. CM0 supports request/reply commands and framed
 file transfers, but does not route FTDI binary events or USB directory-list
 events over the mailbox. The on-device adapters likewise need an actual event
 transport; decoder availability alone does not supply one.
+
+## Peer streams
+
+The OneWili clients on a board (the display CPU, the ESP32, the CM0 and a
+host PC) can pass best-effort datagrams of 1-128 bytes to each other, routed
+by the main CPU. The C, CM0 and WiliBSP packages expose `ow_stream_write`,
+`ow_stream_poll` and `ow_stream_drops` in `onewili_stream.h`; Python has
+`dev.streams`. The wire contract is `ow_stream_wire.h`. Peer streams need
+main firmware with the stream router (stable command ids 625-627); see the
+`Peer streams` section of each package README.
 
 ## Generated code
 

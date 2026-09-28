@@ -24,6 +24,13 @@ digital words in ring order, then a 2048-byte analog buffer when enabled.
 Digital head/trigger indices are words; analog indices are samples. CAN FD
 events retain both controller headers and all sixteen data words.
 
+Peer streams (`include/onewili_stream.h`): `ow_stream_write`, `ow_stream_poll`
+and `ow_stream_drops` pass best-effort datagrams of 1-128 bytes between
+OneWili clients (the display CPU, the ESP32, the CM0 and this host), routed
+by the main CPU. Here they ride three menu commands, with poll results
+fetched in batches; a push-capable transport binds a faster path with
+`ow_stream_bind`. The same calls mean the same thing on every target.
+
 ## Build
 
 ```

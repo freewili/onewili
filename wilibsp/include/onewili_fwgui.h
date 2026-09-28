@@ -1,6 +1,6 @@
 /* FwGUI display-link transport for the OneWili C API (WiliBSP / RP2350B).
  * Talks to the FreeWili 2 main CPU over UART0 (Rx=GPIO0, Tx=GPIO1,
- * RTS=GPIO2, CTS=GPIO3) at 8,000,000 baud with hardware flow control.
+ * CTS=GPIO2, RTS=GPIO3) at 8,000,000 baud with hardware flow control.
  * Single link per board: the state behind these transports is static. */
 #ifndef ONEWILI_FWGUI_H
 #define ONEWILI_FWGUI_H
@@ -10,7 +10,12 @@
  * (which performs the 0x02 reset handshake). Call once at startup.
  * Receive is interrupt driven (UART0_IRQ, exclusive handler): bytes land in
  * a 32 KB ring whatever the app is doing, so MAIN is never held on CTS by a
- * slow display loop. */
+ * slow display loop.
+ * It also binds this link's peer-stream fast path to dev (onewili_stream.h):
+ * datagrams travel as FwGUI 0xF1 frames, received ones wait in a 16-slot
+ * ring (drop-newest), and ow_stream_poll/ow_stream_drops never block. Call
+ * ow_stream_poll regularly once you use streams -- it sends the keepalive
+ * that keeps MAIN routing datagrams to this CPU. */
 ow_status ow_open_fwgui(ow_device* dev);
 
 /* The binary-event stream (FWGUI_API_ONEWILL_BINARY frames) as a transport
@@ -24,6 +29,8 @@ ow_transport ow_fwgui_binary_transport(void);
  *     than an in-flight SD call consumed, so polling more often does NOT help
  *     (the app was already blocked inside that call);
  *   - an SDFS frame was longer than SDFS_MAX_FRAME.
+ * Peer-stream datagrams (0xF1) are not included: they count in
+ * ow_stream_drops() and the stream_* stats.
  * Free-running counter; never reset except by ow_open_fwgui. */
 uint32_t ow_fwgui_dropped_frames(void);
 
@@ -53,6 +60,17 @@ typedef struct ow_fwgui_stats {
     uint32_t text_max_fill;        /* high-water marks of the stream FIFOs (bytes) */
     uint32_t binary_max_fill;
     uint32_t tx_bytes;             /* bytes written to the link (framed) */
+    uint32_t length_errors;        /* frames claiming more than 512 payload bytes: resynced at once */
+    /* Peer streams (0xF1). All of the drops below are part of ow_stream_drops. */
+    uint32_t frames_stream;        /* 0xF1 frames accepted: datagrams and HELLO/CREDIT control */
+    uint32_t stream_dropped;       /* datagrams dropped here: ring full, or the poll buffer too small */
+    uint32_t stream_malformed;     /* 0xF1 frames with a bad length, destination or sender */
+    uint32_t stream_max_fill;      /* high-water mark of the datagram FIFO (bytes, 2 per datagram + data) */
+    uint32_t stream_tx_frames;     /* datagrams sent */
+    uint32_t stream_tx_refused;    /* writes refused: link not yet confirmed by MAIN, or window full */
+    uint32_t stream_tx_lost;       /* sent datagrams MAIN never received (a lower bound) */
+    uint32_t stream_credits;       /* CREDIT frames received from MAIN */
+    uint32_t stream_confirmed;     /* 1 once MAIN has answered the link's HELLO */
 } ow_fwgui_stats;
 void ow_fwgui_get_stats(ow_fwgui_stats* out);
 

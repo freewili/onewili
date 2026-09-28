@@ -78,6 +78,39 @@ gives the underlying sdfslib status; `ow_sd_set_timeout_ms()` changes the
 and metadata calls (`ow_sd_stat`, `ow_sd_list`, `ow_sd_mkdir`, `ow_sd_remove`,
 `ow_sd_rename`) need no handle.
 
+## Peer streams
+
+`onewili_stream.h` passes best-effort datagrams of 1-128 bytes between OneWili
+clients -- this display CPU, the ESP32, the CM0 and the PC host -- routed by
+the main CPU. `ow_open_fwgui` binds them to the display link, so they never
+wait on a command round trip:
+
+```c
+#include "onewili_stream.h"
+
+ow_stream_write(&dev, OW_PEER_ESP32, "hi", 2);   /* OW_OK once it has left */
+
+uint8_t buf[OW_STREAM_MTU]; ow_peer from;
+int n;
+while ((n = ow_stream_poll(&dev, &from, buf, sizeof buf)) > 0) {
+    /* one whole datagram of n bytes from `from` */
+}
+```
+
+Nothing ever waits for the destination: a datagram that cannot be taken is
+dropped and counted, and `ow_stream_drops(&dev)` is the total lost anywhere
+(refused here, dropped by the main CPU on its way out or in, or dropped here).
+Call `ow_stream_poll` regularly (every loop pass) once you use streams: it
+drains the 2 KB receive FIFO (each datagram takes its size plus 2 bytes) and
+sends the once-a-second keepalive without which the main CPU stops routing
+datagrams to this CPU after 3 s. The first `ow_stream_write` after open is
+refused (`OW_ERR_BUFFER`) until the main CPU has confirmed the link, which
+takes one round trip, and so is a write that would put more than
+`OW_STREAM_WINDOW` (768) bytes in flight to the main CPU, counting each
+datagram as its size plus 10 bytes of framing (flow control: its receive
+buffer is small) -- about 5 full-size or 69 one-byte datagrams. Link counters are in the `stream_*` fields of
+`ow_fwgui_get_stats()`.
+
 ## Build
 
 `CMakeLists.txt` builds a `onewili_fwgui` static library against the

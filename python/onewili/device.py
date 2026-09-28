@@ -20,6 +20,7 @@ class OneWili:
         self._binary_port = binary_port
         self._binary = None
         self._files = None
+        self._streams = None
         self.io = IO(self._transport, "i")
         self.gui = GUI(self._transport, "g")
         self.hardware = Hardware(self._transport, "h")
@@ -79,6 +80,14 @@ class OneWili:
             from .files import Files
             self._files = Files(self)
         return self._files
+
+    @property
+    def streams(self):
+        """Peer streams: datagrams to and from the other OneWili clients (lazily constructed)."""
+        if self._streams is None:
+            from .streams import Streams
+            self._streams = Streams(self)
+        return self._streams
 
     def close(self) -> None:
         self.close_binary()

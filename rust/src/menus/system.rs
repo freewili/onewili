@@ -56,6 +56,42 @@ impl<'a> System<'a> {
         let enabled = encoding::tok_bool(&mut toks)?;
         Ok(enabled)
     }
+
+    /// Stream Write. Sends one peer-stream datagram (1-128 bytes) to another OneWili client through MAIN. Best effort: a datagram the destination cannot take now is dropped and counted, never queued behind.. Wire: `h\a\w`
+    pub fn stream_write(&mut self, dst: i32, data: &[u8]) -> Result<bool, OwError> {
+        let mut cmd = String::from("h\\a\\w");
+        encoding::push_int(&mut cmd, dst as i64);
+        encoding::push_bytes(&mut cmd, data);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let delivered = encoding::tok_bool(&mut toks)?;
+        Ok(delivered)
+    }
+
+    /// Stream Poll. Pops peer-stream datagrams queued for the calling client: frames popped, frames still queued, frames dropped for this client so far, then the datagrams packed as [src][len][bytes] records.. Wire: `h\a\p`
+    pub fn stream_poll(&mut self, max: i32) -> Result<(i32, i32, i32, Vec<u8>), OwError> {
+        let mut cmd = String::from("h\\a\\p");
+        encoding::push_int(&mut cmd, max as i64);
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let frames = encoding::tok_int(&mut toks)? as i32;
+        let queued = encoding::tok_int(&mut toks)? as i32;
+        let dropped = encoding::tok_int(&mut toks)? as i32;
+        let data = encoding::rest_bytes(&mut toks)?;
+        Ok((frames, queued, dropped, data))
+    }
+
+    /// Stream Status. Peer-stream state for the calling client: the datagram MTU, datagrams waiting in its queue, datagrams addressed to it that MAIN dropped, and datagrams it sent that MAIN dropped.. Wire: `h\a\c`
+    pub fn stream_status(&mut self) -> Result<(i32, i32, i32, i32), OwError> {
+        let cmd = String::from("h\\a\\c");
+        let resp = self.t.call(&cmd)?;
+        let mut toks = resp.split_whitespace();
+        let mtu = encoding::tok_int(&mut toks)? as i32;
+        let queued = encoding::tok_int(&mut toks)? as i32;
+        let droppedto = encoding::tok_int(&mut toks)? as i32;
+        let droppedfrom = encoding::tok_int(&mut toks)? as i32;
+        Ok((mtu, queued, droppedto, droppedfrom))
+    }
 }
 
 /// Spontaneous event frames this menu emits:

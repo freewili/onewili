@@ -4,6 +4,7 @@
 //! crate::transport::call - the firmware assembles/decodes the
 //! wire command natively; there is no encoding/framing here.
 
+use crate::transport::OwError;
 
 pub struct Wireless<'a> {
     #[allow(dead_code)]
@@ -49,5 +50,13 @@ impl<'a> Wireless<'a> {
     /// RFID Functions sub-menu.
     pub fn rfid(self) -> super::rfid::Rfid<'a> {
         super::rfid::Rfid { t: self.t }
+    }
+
+    /// ESP32 Mode. What the ESP32-C5 runs: Default Firmware (the stock WiFi/BLE app) or OneWili API (a BSP app on the ESP32 drives MAIN's OneWili API). OneWili API does not install an app - flash one first.. Wire: `w\e`
+    pub fn e_sp32_mode(&mut self, value: i32) -> Result<(), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.i32(value);
+        let _r = crate::transport::call(624 /* CMD_WIRELESS_E_SP32_MODE */, &a)?;
+        Ok(())
     }
 }

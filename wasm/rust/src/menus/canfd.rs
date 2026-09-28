@@ -12,6 +12,11 @@ pub struct Canfd<'a> {
 }
 
 impl<'a> Canfd<'a> {
+    /// ISO-TP Transport sub-menu.
+    pub fn isotp(self) -> super::isotp::Isotp<'a> {
+        super::isotp::Isotp { t: self.t }
+    }
+
     /// Stream CAN(FD). Streams received CAN frames and errors to the host.. Wire: `i\c\o`
     pub fn enable_canfd_stream(&mut self, channel: i32, enabled: i32) -> Result<(), OwError> {
         let mut a = crate::transport::Args::new();

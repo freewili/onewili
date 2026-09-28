@@ -51,4 +51,28 @@ impl<'a> System<'a> {
         let mut _r = crate::transport::call(438 /* CMD_HARDWARE_SYSTEM_EVENT_HOST_STREAMING */, &a)?;
         Ok(_r.u8() != 0)
     }
+
+    /// Stream Write. Sends one peer-stream datagram (1-128 bytes) to another OneWili client through MAIN. Best effort: a datagram the destination cannot take now is dropped and counted, never queued behind.. Wire: `h\a\w`
+    pub fn stream_write(&mut self, dst: i32, data: &[u8]) -> Result<bool, OwError> {
+        let mut a = crate::transport::Args::new();
+        a.i32(dst);
+        a.bytes(data);
+        let mut _r = crate::transport::call(625 /* CMD_HARDWARE_SYSTEM_STREAM_WRITE */, &a)?;
+        Ok(_r.u8() != 0)
+    }
+
+    /// Stream Poll. Pops peer-stream datagrams queued for the calling client: frames popped, frames still queued, frames dropped for this client so far, then the datagrams packed as [src][len][bytes] records.. Wire: `h\a\p`
+    pub fn stream_poll(&mut self, max: i32) -> Result<(i32, i32, i32, Vec<u8>), OwError> {
+        let mut a = crate::transport::Args::new();
+        a.i32(max);
+        let mut _r = crate::transport::call(626 /* CMD_HARDWARE_SYSTEM_STREAM_POLL */, &a)?;
+        Ok((_r.i32(), _r.i32(), _r.i32(), _r.bytes()))
+    }
+
+    /// Stream Status. Peer-stream state for the calling client: the datagram MTU, datagrams waiting in its queue, datagrams addressed to it that MAIN dropped, and datagrams it sent that MAIN dropped.. Wire: `h\a\c`
+    pub fn stream_status(&mut self) -> Result<(i32, i32, i32, i32), OwError> {
+        let a = crate::transport::Args::new();
+        let mut _r = crate::transport::call(627 /* CMD_HARDWARE_SYSTEM_STREAM_STATUS */, &a)?;
+        Ok((_r.i32(), _r.i32(), _r.i32(), _r.i32()))
+    }
 }
